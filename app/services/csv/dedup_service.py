@@ -123,7 +123,10 @@ def build_dedup_index(db: Session, organization_id: int | None, exclude_import_i
 
 
 def compute_dedup_stats(db: Session, lead_import: LeadImport) -> dict:
-    """Analysis for the upload page, computed from the raw rows vs the organization's existing leads."""
+    """Analysis for the upload page, computed from the raw rows vs the organization's existing leads.
+    Only rows that would actually be imported (see classify_row) are considered."""
+    from app.services.csv.import_service import classify_row
+
     index = build_dedup_index(db, lead_import.organization_id, lead_import.id)
     mapping = lead_import.column_mapping or {}
     rows = lead_import.raw_rows or []
@@ -137,10 +140,10 @@ def compute_dedup_stats(db: Session, lead_import: LeadImport) -> dict:
     total_leads = 0
 
     for row in rows:
-        full_name = cell(row, "full_name")
-        if not full_name:
-            continue
+        if classify_row(row, mapping) != "keep":
+            continue  # dropped rows never become leads
         total_leads += 1
+        full_name = cell(row, "full_name")
         company_name = cell(row, "company_name")
         domain = _safe_domain(cell(row, "company_website"))
         email = cell(row, "email")

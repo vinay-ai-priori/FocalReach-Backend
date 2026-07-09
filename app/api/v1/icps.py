@@ -6,6 +6,7 @@ from app.api.deps import get_db
 from app.core.exceptions import NotFoundError
 from app.models.icp import ICP
 from app.models.user import User
+from app.repositories.campaign_repository import CampaignRepository
 from app.repositories.company_intelligence_repository import CompanyIntelligenceRepository
 from app.repositories.icp_repository import ICPRepository
 from app.schemas.icp import ICPGenerateRequest, ICPOut, ICPUpdateRequest
@@ -31,7 +32,14 @@ def generate(
     intelligence = CompanyIntelligenceRepository(db).get(payload.company_intelligence_id)
     if not intelligence:
         raise NotFoundError(f"Company intelligence {payload.company_intelligence_id} not found.")
-    return ICPOut.model_validate(generate_icp(db, intelligence, user_id=user.id))
+    icp = generate_icp(db, intelligence, user_id=user.id)
+    if payload.campaign_id:
+        campaign = CampaignRepository(db).get(payload.campaign_id)
+        if campaign and campaign.user_id == user.id:
+            CampaignRepository(db).update(
+                campaign, company_intelligence_id=intelligence.id, icp_id=icp.id
+            )
+    return ICPOut.model_validate(icp)
 
 
 @router.get("/{icp_id}", response_model=ICPOut)

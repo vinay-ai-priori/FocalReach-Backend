@@ -73,33 +73,35 @@ def compute_stats(lead_import: LeadImport) -> dict:
     they refresh whenever the user remaps a column. Uses the raw rows still held pre-confirm."""
     rows = lead_import.raw_rows or []
     mapping = lead_import.column_mapping or {}
-    company_col = mapping.get("company_name")
-    name_col = mapping.get("full_name")
-    email_col = mapping.get("email")
 
     companies: set[str] = set()
-    total_leads = 0
-    invalid_missing_email = 0
+    kept = 0
+    drop_no_company = drop_no_name = drop_no_email = 0
 
     for row in rows:
-        if company_col:
-            company_name = (row.get(company_col) or "").strip()
-            if company_name:
-                companies.add(company_name.lower())
-        # A row becomes a lead only if it carries a name.
-        full_name = (row.get(name_col) or "").strip() if name_col else ""
-        if full_name:
-            total_leads += 1
-            email = (row.get(email_col) or "").strip() if email_col else ""
-            if not email:
-                invalid_missing_email += 1
+        verdict = classify_row(row, mapping)
+        if verdict == "no_company":
+            drop_no_company += 1
+            continue
+        if verdict == "no_name":
+            drop_no_name += 1
+            continue
+        if verdict == "no_email":
+            drop_no_email += 1
+            continue
+        # kept row
+        kept += 1
+        companies.add(_get(row, mapping, "company_name").lower())
 
     return {
         "rows_detected": lead_import.total_rows,
         "columns_detected": len(lead_import.raw_columns or []),
         "unique_companies": len(companies),
-        "total_leads": total_leads,
-        "invalid_leads_missing_email": invalid_missing_email,
+        "total_leads": kept,  # rows that will actually be imported
+        "rows_dropped": drop_no_company + drop_no_name + drop_no_email,
+        "dropped_missing_company": drop_no_company,
+        "dropped_missing_name": drop_no_name,
+        "dropped_missing_email": drop_no_email,
     }
 
 
@@ -129,6 +131,18 @@ def _parse_int(value: str | None) -> int | None:
     return int(digits) if digits else None
 
 
+def classify_row(row: dict, mapping: dict) -> str:
+    """A row is only imported when it can be identified and contacted.
+    Returns 'keep' or a drop reason: 'no_company' | 'no_name' | 'no_email'."""
+    if not _get(row, mapping, "company_name"):
+        return "no_company"
+    if not _get(row, mapping, "full_name"):
+        return "no_name"
+    if not _get(row, mapping, "email"):
+        return "no_email"
+    return "keep"
+
+
 def confirm_import(db: Session, lead_import: LeadImport) -> LeadImport:
     """Materialize raw rows into Company and Lead records, deduplicating companies."""
     if lead_import.status != ImportStatus.MAPPING:
@@ -142,15 +156,16 @@ def confirm_import(db: Session, lead_import: LeadImport) -> LeadImport:
 
     companies_by_key: dict[str, Company] = {}
     leads: list[Lead] = []
-    skipped = 0
+    dropped = 0
     duplicates = 0
 
     for row in lead_import.raw_rows or []:
-        company_name = _get(row, mapping, "company_name")
-        if not company_name:
-            skipped += 1
+        # Drop rows we can't identify or contact (missing company name, name, or email).
+        if classify_row(row, mapping) != "keep":
+            dropped += 1
             continue
 
+        company_name = _get(row, mapping, "company_name")
         company_key = company_name.lower()
         company = companies_by_key.get(company_key)
         if company is None:
@@ -181,9 +196,6 @@ def confirm_import(db: Session, lead_import: LeadImport) -> LeadImport:
             db.flush()
 
         full_name = _get(row, mapping, "full_name")
-        if not full_name:
-            skipped += 1
-            continue
         # We only collect Full Name; derive first/last from it for greetings & personalization.
         name_parts = full_name.split()
         first_name = name_parts[0] if name_parts else None
@@ -223,7 +235,7 @@ def confirm_import(db: Session, lead_import: LeadImport) -> LeadImport:
     db.commit()
     db.refresh(lead_import)
     logger.info(
-        "Import %s confirmed: %s companies, %s leads, %s skipped, %s duplicates eliminated",
-        lead_import.id, len(companies_by_key), len(leads), skipped, duplicates,
+        "Import %s confirmed: %s companies, %s leads, %s dropped, %s duplicates eliminated",
+        lead_import.id, len(companies_by_key), len(leads), dropped, duplicates,
     )
     return lead_import

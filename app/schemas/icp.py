@@ -5,6 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class ICPGenerateRequest(BaseModel):
     company_intelligence_id: int
+    campaign_id: int | None = None
 
 
 class ICPUpdateRequest(BaseModel):

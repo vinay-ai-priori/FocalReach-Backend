@@ -45,9 +45,13 @@ class ImportStats(BaseModel):
     rows_detected: int
     columns_detected: int
     unique_companies: int
-    total_leads: int
-    invalid_leads_missing_email: int
-    # Cross-campaign deduplication (scoped to the current user for now)
+    total_leads: int  # rows that will actually be imported (after drops)
+    # Rows dropped at import (missing company name, name, or email)
+    rows_dropped: int
+    dropped_missing_company: int
+    dropped_missing_name: int
+    dropped_missing_email: int
+    # Cross-campaign deduplication (organization-scoped)
     already_targeted_companies: int
     duplicate_active_leads: int
     net_new_leads: int

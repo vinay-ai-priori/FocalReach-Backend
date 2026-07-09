@@ -5,6 +5,7 @@ from app.api.auth_deps import get_current_user
 from app.api.deps import get_db
 from app.api.ownership import get_owned_import
 from app.models.user import User
+from app.repositories.campaign_repository import CampaignRepository
 from app.core.exceptions import NotFoundError, ValidationFailedError
 from app.models.lead_import import ImportStatus
 from app.repositories.icp_repository import ICPRepository
@@ -56,6 +57,7 @@ def _validation_out(db: Session, lead_import) -> ImportValidationOut:
 @router.post("/upload", response_model=ImportValidationOut)
 def upload_csv(
     icp_id: int = Form(...),
+    campaign_id: int | None = Form(default=None),
     file: UploadFile = File(...),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -68,6 +70,10 @@ def upload_csv(
     lead_import = parse_and_validate(
         db, icp, file.filename, file.file.read(), user_id=user.id, organization_id=user.organization_id
     )
+    if campaign_id:
+        campaign = CampaignRepository(db).get(campaign_id)
+        if campaign and campaign.user_id == user.id:
+            CampaignRepository(db).update(campaign, lead_import_id=lead_import.id)
     return _validation_out(db, lead_import)
 
 

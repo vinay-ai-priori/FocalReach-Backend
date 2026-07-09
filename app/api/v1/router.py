@@ -1,10 +1,23 @@
 from fastapi import APIRouter
 
-from app.api.v1 import admin, auth, company_intelligence, crm, icps, imports, leads, outreach, qualification, websites
+from app.api.v1 import (
+    admin,
+    auth,
+    campaigns,
+    company_intelligence,
+    crm,
+    icps,
+    imports,
+    leads,
+    outreach,
+    qualification,
+    websites,
+)
 
 api_router = APIRouter()
 api_router.include_router(auth.router)
 api_router.include_router(admin.router)
+api_router.include_router(campaigns.router)
 api_router.include_router(websites.router)
 api_router.include_router(company_intelligence.router)
 api_router.include_router(icps.router)
