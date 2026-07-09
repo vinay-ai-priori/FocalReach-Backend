@@ -1,0 +1,229 @@
+"""CSV parsing, validation, and confirmed import into companies + leads."""
+
+import csv
+import io
+import re
+
+from sqlalchemy.orm import Session
+
+from app.core.exceptions import ValidationFailedError
+from app.core.logging import get_logger
+from app.models.company import Company
+from app.models.icp import ICP
+from app.models.lead import Lead
+from app.models.lead_import import ImportStatus, LeadImport
+from app.repositories.lead_import_repository import LeadImportRepository
+from app.services.csv.column_matcher import build_missing_field_report, match_columns
+from app.services.csv.dedup_service import build_dedup_index
+from app.services.website.url_validator import extract_domain
+
+logger = get_logger(__name__)
+
+MAX_ROWS = 20000
+
+
+def parse_and_validate(
+    db: Session,
+    icp: ICP,
+    filename: str,
+    file_bytes: bytes,
+    user_id: int | None = None,
+    organization_id: int | None = None,
+) -> LeadImport:
+    try:
+        text = file_bytes.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = file_bytes.decode("latin-1")
+
+    reader = csv.DictReader(io.StringIO(text))
+    if not reader.fieldnames:
+        raise ValidationFailedError("The CSV file has no header row.")
+
+    columns = [c.strip() for c in reader.fieldnames if c and c.strip()]
+    rows = []
+    for i, row in enumerate(reader):
+        if i >= MAX_ROWS:
+            raise ValidationFailedError(f"CSV exceeds the {MAX_ROWS} row limit for a single import.")
+        rows.append({(k or "").strip(): (v or "").strip() for k, v in row.items()})
+
+    if not rows:
+        raise ValidationFailedError("The CSV file contains no data rows.")
+
+    matching = match_columns(columns)
+    column_mapping = {key: val["csv_column"] for key, val in matching.items()}
+    missing = build_missing_field_report(matching)
+
+    lead_import = LeadImport(
+        icp_id=icp.id,
+        user_id=user_id,
+        organization_id=organization_id,
+        filename=filename,
+        status=ImportStatus.MAPPING,
+        total_rows=len(rows),
+        raw_columns=columns,
+        column_mapping=column_mapping,
+        missing_fields=missing,
+        raw_rows=rows,
+    )
+    return LeadImportRepository(db).create(lead_import)
+
+
+def compute_stats(lead_import: LeadImport) -> dict:
+    """CSV analytics for the validation page, computed from the current column mapping so
+    they refresh whenever the user remaps a column. Uses the raw rows still held pre-confirm."""
+    rows = lead_import.raw_rows or []
+    mapping = lead_import.column_mapping or {}
+    company_col = mapping.get("company_name")
+    name_col = mapping.get("full_name")
+    email_col = mapping.get("email")
+
+    companies: set[str] = set()
+    total_leads = 0
+    invalid_missing_email = 0
+
+    for row in rows:
+        if company_col:
+            company_name = (row.get(company_col) or "").strip()
+            if company_name:
+                companies.add(company_name.lower())
+        # A row becomes a lead only if it carries a name.
+        full_name = (row.get(name_col) or "").strip() if name_col else ""
+        if full_name:
+            total_leads += 1
+            email = (row.get(email_col) or "").strip() if email_col else ""
+            if not email:
+                invalid_missing_email += 1
+
+    return {
+        "rows_detected": lead_import.total_rows,
+        "columns_detected": len(lead_import.raw_columns or []),
+        "unique_companies": len(companies),
+        "total_leads": total_leads,
+        "invalid_leads_missing_email": invalid_missing_email,
+    }
+
+
+def update_mapping(db: Session, lead_import: LeadImport, column_mapping: dict[str, str | None]) -> LeadImport:
+    valid_columns = set(lead_import.raw_columns)
+    for key, column in column_mapping.items():
+        if column is not None and column not in valid_columns:
+            raise ValidationFailedError(f"Column '{column}' does not exist in the uploaded CSV.")
+    merged = {**lead_import.column_mapping, **column_mapping}
+    matching = {k: {"csv_column": v, "confidence": 100.0 if v else 0.0} for k, v in merged.items()}
+    missing = build_missing_field_report(matching)
+    return LeadImportRepository(db).update(lead_import, column_mapping=merged, missing_fields=missing)
+
+
+def _get(row: dict, mapping: dict, key: str) -> str | None:
+    column = mapping.get(key)
+    if not column:
+        return None
+    value = (row.get(column) or "").strip()
+    return value or None
+
+
+def _parse_int(value: str | None) -> int | None:
+    if not value:
+        return None
+    digits = re.sub(r"[^\d]", "", value)
+    return int(digits) if digits else None
+
+
+def confirm_import(db: Session, lead_import: LeadImport) -> LeadImport:
+    """Materialize raw rows into Company and Lead records, deduplicating companies."""
+    if lead_import.status != ImportStatus.MAPPING:
+        return lead_import
+    mapping = lead_import.column_mapping
+    if not mapping.get("company_name"):
+        raise ValidationFailedError("A Company Name column must be mapped before import.")
+
+    # Cross-campaign dedup index for the organization's OTHER campaigns (built once).
+    dedup_index = build_dedup_index(db, lead_import.organization_id, lead_import.id)
+
+    companies_by_key: dict[str, Company] = {}
+    leads: list[Lead] = []
+    skipped = 0
+    duplicates = 0
+
+    for row in lead_import.raw_rows or []:
+        company_name = _get(row, mapping, "company_name")
+        if not company_name:
+            skipped += 1
+            continue
+
+        company_key = company_name.lower()
+        company = companies_by_key.get(company_key)
+        if company is None:
+            website = _get(row, mapping, "company_website")
+            domain = None
+            if website:
+                try:
+                    domain = extract_domain(website)
+                except Exception:
+                    domain = None
+            company = Company(
+                lead_import_id=lead_import.id,
+                name=company_name,
+                website=website,
+                domain=domain,
+                industry=_get(row, mapping, "company_industry"),
+                description=_get(row, mapping, "company_description"),
+                city=_get(row, mapping, "company_city"),
+                state=_get(row, mapping, "company_state"),
+                country=_get(row, mapping, "company_country"),
+                employee_count=_parse_int(_get(row, mapping, "company_employee_count")),
+                employee_range=_get(row, mapping, "company_employee_range"),
+                annual_revenue=_get(row, mapping, "company_revenue"),
+                linkedin_url=_get(row, mapping, "company_linkedin"),
+            )
+            companies_by_key[company_key] = company
+            db.add(company)
+            db.flush()
+
+        full_name = _get(row, mapping, "full_name")
+        if not full_name:
+            skipped += 1
+            continue
+        # We only collect Full Name; derive first/last from it for greetings & personalization.
+        name_parts = full_name.split()
+        first_name = name_parts[0] if name_parts else None
+        last_name = " ".join(name_parts[1:]) if len(name_parts) > 1 else None
+
+        email = _get(row, mapping, "email")
+        is_duplicate, dup_reason, _ = dedup_index.evaluate(
+            company.name, company.domain, email, full_name
+        )
+        if is_duplicate:
+            duplicates += 1
+
+        leads.append(
+            Lead(
+                lead_import_id=lead_import.id,
+                company_id=company.id,
+                full_name=full_name,
+                first_name=first_name,
+                last_name=last_name,
+                title=_get(row, mapping, "title"),
+                seniority=_get(row, mapping, "seniority"),
+                department=_get(row, mapping, "department"),
+                email=email,
+                phone=_get(row, mapping, "phone"),
+                linkedin_url=_get(row, mapping, "linkedin_url"),
+                country=_get(row, mapping, "contact_country"),
+                time_in_role=_get(row, mapping, "time_in_role"),
+                time_at_company=_get(row, mapping, "time_at_company"),
+                is_duplicate=is_duplicate,
+                duplicate_reason=dup_reason,
+            )
+        )
+
+    db.add_all(leads)
+    lead_import.status = ImportStatus.IMPORTED
+    lead_import.raw_rows = None  # drop the raw payload once materialized
+    db.commit()
+    db.refresh(lead_import)
+    logger.info(
+        "Import %s confirmed: %s companies, %s leads, %s skipped, %s duplicates eliminated",
+        lead_import.id, len(companies_by_key), len(leads), skipped, duplicates,
+    )
+    return lead_import
