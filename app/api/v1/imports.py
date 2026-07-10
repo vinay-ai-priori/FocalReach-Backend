@@ -19,7 +19,6 @@ from app.schemas.lead_import import (
     LeadImportOut,
     MissingFieldWarning,
 )
-from app.services.csv.column_matcher import match_columns
 from app.services.csv.field_definitions import FIELD_DEFINITIONS
 from app.services.csv.dedup_service import compute_dedup_stats
 from app.services.csv.import_service import compute_stats, confirm_import, parse_and_validate, update_mapping
@@ -29,17 +28,18 @@ router = APIRouter(prefix="/imports", tags=["lead-imports"])
 
 
 def _validation_out(db: Session, lead_import) -> ImportValidationOut:
-    confidences = {}
-    if lead_import.raw_columns:
-        confidences = match_columns(lead_import.raw_columns)
+    meta = lead_import.mapping_meta or {}
     field_mappings = [
         FieldMapping(
             canonical_field=f.key,
             label=f.label,
             csv_column=lead_import.column_mapping.get(f.key),
-            confidence=(confidences.get(f.key) or {}).get("confidence", 0.0)
+            confidence=(meta.get(f.key) or {}).get("confidence", 0.0)
             if lead_import.column_mapping.get(f.key)
             else 0.0,
+            source=(meta.get(f.key) or {}).get("source")
+            if lead_import.column_mapping.get(f.key)
+            else None,
             required_for=f.required_for,
             is_mandatory=f.is_mandatory,
         )

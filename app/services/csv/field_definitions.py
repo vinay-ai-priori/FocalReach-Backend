@@ -162,6 +162,13 @@ FIELD_DEFINITIONS: list[FieldDef] = [
         consequence_if_missing="Fit score loses the company-tenure signal and will use a neutral default (50/100) for that component.",
     ),
     FieldDef(
+        key="years_experience",
+        label="Total Years of Experience",
+        synonyms=("years of experience", "total years experience", "total experience", "experience", "years experience"),
+        required_for="lead_qualification",
+        consequence_if_missing="Signal score will estimate total experience from role tenure and flag it as estimated; if tenure is also missing, that sub-score is 0.",
+    ),
+    FieldDef(
         key="contact_country",
         label="Contact Country",
         synonyms=("contact country", "contact country (alpha 2)", "contact location - country", "country"),

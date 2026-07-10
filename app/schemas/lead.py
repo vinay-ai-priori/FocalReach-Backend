@@ -25,9 +25,12 @@ class LeadOut(BaseModel):
     country: str | None = None
     time_in_role: str | None = None
     time_at_company: str | None = None
+    years_experience: str | None = None
     industry_score: float | None = None
     role_score: float | None = None
     fit_score: float | None = None
+    signal_score: float | None = None
+    company_fit_score: float | None = None
     total_score: float | None = None
     tier: LeadTier | None = None
     score_breakdown: dict | None = None

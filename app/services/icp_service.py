@@ -15,6 +15,7 @@ Return ONLY a JSON object with exactly these keys:
   "target_industries": [string] (4-6 industries most likely to buy),
   "company_size_ranges": [{"min": int, "max": int or null, "label": string}] (e.g. {"min": 201, "max": 1000, "label": "201-1,000"}),
   "target_roles": [string] (5-7 job titles of likely buyers),
+  "target_keywords": [string] (5-8 keywords/phrases that signal a strong fit — technologies, pain points, or intent terms),
   "target_seniorities": [string] (subset of: "C-Level", "VP", "Director", "Manager", "Head"),
   "target_geographies": [string] (countries or regions),
   "outreach_tone": string (one of: "consultative", "direct", "formal")
@@ -47,6 +48,7 @@ def generate_icp(db: Session, intelligence: CompanyIntelligence, user_id: int | 
         target_industries=data.get("target_industries") or [],
         company_size_ranges=data.get("company_size_ranges") or [],
         target_roles=data.get("target_roles") or [],
+        target_keywords=data.get("target_keywords") or [],
         target_seniorities=data.get("target_seniorities") or [],
         target_geographies=data.get("target_geographies") or [],
         outreach_tone=(data.get("outreach_tone") or "consultative").lower(),

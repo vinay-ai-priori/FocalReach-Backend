@@ -49,8 +49,13 @@ def parse_and_validate(
     if not rows:
         raise ValidationFailedError("The CSV file contains no data rows.")
 
-    matching = match_columns(columns)
+    matching = match_columns(columns, db=db)
     column_mapping = {key: val["csv_column"] for key, val in matching.items()}
+    mapping_meta = {
+        key: {"confidence": val["confidence"], "source": val.get("source")}
+        for key, val in matching.items()
+        if val["csv_column"]
+    }
     missing = build_missing_field_report(matching)
 
     lead_import = LeadImport(
@@ -62,6 +67,7 @@ def parse_and_validate(
         total_rows=len(rows),
         raw_columns=columns,
         column_mapping=column_mapping,
+        mapping_meta=mapping_meta,
         missing_fields=missing,
         raw_rows=rows,
     )
@@ -111,9 +117,17 @@ def update_mapping(db: Session, lead_import: LeadImport, column_mapping: dict[st
         if column is not None and column not in valid_columns:
             raise ValidationFailedError(f"Column '{column}' does not exist in the uploaded CSV.")
     merged = {**lead_import.column_mapping, **column_mapping}
+    meta = dict(lead_import.mapping_meta or {})
+    for key, column in column_mapping.items():
+        if column:
+            meta[key] = {"confidence": 100.0, "source": "manual"}
+        else:
+            meta.pop(key, None)
     matching = {k: {"csv_column": v, "confidence": 100.0 if v else 0.0} for k, v in merged.items()}
     missing = build_missing_field_report(matching)
-    return LeadImportRepository(db).update(lead_import, column_mapping=merged, missing_fields=missing)
+    return LeadImportRepository(db).update(
+        lead_import, column_mapping=merged, mapping_meta=meta, missing_fields=missing
+    )
 
 
 def _get(row: dict, mapping: dict, key: str) -> str | None:
@@ -224,6 +238,7 @@ def confirm_import(db: Session, lead_import: LeadImport) -> LeadImport:
                 country=_get(row, mapping, "contact_country"),
                 time_in_role=_get(row, mapping, "time_in_role"),
                 time_at_company=_get(row, mapping, "time_at_company"),
+                years_experience=_get(row, mapping, "years_experience"),
                 is_duplicate=is_duplicate,
                 duplicate_reason=dup_reason,
             )

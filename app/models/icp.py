@@ -23,6 +23,7 @@ class ICP(Base, PublicIDMixin, TimestampMixin):
     target_industries: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
     company_size_ranges: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)  # [{min, max, label}]
     target_roles: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    target_keywords: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
     target_seniorities: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
     target_geographies: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
     outreach_tone: Mapped[str] = mapped_column(String(50), default="consultative", nullable=False)

@@ -26,6 +26,9 @@ class CompanyOut(BaseModel):
     qualification_status: QualificationStatus
     qualification_checks: list | None = None
     qualification_override: bool = False
+    industry_match_score: float | None = None
+    company_fit_score: float | None = None
+    qualification_reasoning: str | None = None
 
 
 class QualificationDecision(BaseModel):

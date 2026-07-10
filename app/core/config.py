@@ -17,6 +17,11 @@ class Settings(BaseSettings):
     # Database
     DATABASE_URL: str = "postgresql+psycopg2://postgres:postgres@localhost:5432/focalreach"
 
+    # Rate limiting (per client IP, one-minute windows)
+    RATE_LIMIT_ENABLED: bool = True
+    RATE_LIMIT_PER_MINUTE: int = 120
+    RATE_LIMIT_AUTH_PER_MINUTE: int = 10
+
     # Redis / Celery
     REDIS_URL: str = "redis://localhost:6379/0"
     CELERY_BROKER_URL: str = "redis://localhost:6379/1"
@@ -25,6 +30,9 @@ class Settings(BaseSettings):
     # OpenAI
     OPENAI_API_KEY: str = ""
     OPENAI_MODEL: str = "gpt-4o-mini"
+    OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
+    # Cosine-similarity floor for the semantic column-matching tier (0-1).
+    SEMANTIC_MATCH_THRESHOLD: float = 0.55
     AI_CACHE_TTL_SECONDS: int = 7 * 24 * 3600
 
     # Website intelligence

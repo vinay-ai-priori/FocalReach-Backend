@@ -1,20 +1,36 @@
-"""Company qualification against the ICP. Fully deterministic — no AI.
+"""Company qualification against the ICP.
 
-Each company is checked on geography, industry, and employee size:
-- all checks pass  -> approved
-- any check fails  -> rejected
-- any check has no data (or is borderline) -> review (human decision)
+Flow (in order, cheapest first):
+1. Gate 1 — geography match (deterministic). Fail -> rejected, no enrichment.
+2. Gate 2 — employee size match (deterministic). Fail -> rejected, no enrichment.
+   Missing data on either gate -> review (human decision), no enrichment.
+3. Gate passers are enriched (website crawl + structured AI profile), then a single
+   LLM call returns two 0-100 scores:
+   - industry_match_score: intelligent (non-keyword) match of the company's CSV
+     industry + description against the ICP target industries.
+   - company_fit_score: how well the enriched website profile aligns with the ICP
+     keywords and campaign objective.
+4. Verdict from the average of the two scores:
+   > 55 qualified (approved) | 40-55 review | < 40 disqualified (rejected).
 """
+
+import json
 
 from rapidfuzz import fuzz
 from sqlalchemy.orm import Session
 
+from app.core.logging import get_logger
 from app.models.company import Company, QualificationStatus
 from app.models.icp import ICP
 from app.models.lead_import import ImportStatus, LeadImport
 from app.repositories.company_repository import CompanyRepository
+from app.services.ai.openai_client import cached_json_completion
+from app.services.enrichment_service import enrich_company
 
-INDUSTRY_MATCH_THRESHOLD = 78.0
+logger = get_logger(__name__)
+
+QUALIFIED_THRESHOLD = 55.0
+REVIEW_THRESHOLD = 40.0
 
 # Common geography aliases so "USA" matches "United States", etc.
 GEO_ALIASES = {
@@ -32,6 +48,22 @@ REGION_MEMBERS = {
     "apac": {"australia", "japan", "singapore", "india", "china", "south korea", "new zealand"},
     "emea": set(),  # broad; treated as match-any for Europe/Middle East/Africa via region check below
 }
+
+SCORING_SYSTEM_PROMPT = """You are an impartial B2B sales-qualification analyst. You evaluate how well a prospect company matches an Ideal Customer Profile (ICP).
+Judge ONLY from the inputs provided. Be strictly neutral: no bias toward or against any industry, region, company type, or business model. Do not assume facts that are not in the inputs. Missing or thin data should lower confidence, reflected as a mid-to-low score — never guess in either direction.
+
+Score two independent dimensions, each 0-100:
+
+1. industry_match_score — how well the prospect's industry and description (from the CSV) match the ICP target industries. This is an intelligent semantic judgment, NOT keyword matching: adjacent, overlapping, or sub-industries of a target count as strong matches; unrelated industries score low.
+
+2. company_fit_score — how well the prospect's enriched website profile aligns with the ICP fit keywords and the campaign objective. Consider what the company does, who it serves, its technologies, and the problems it addresses — does this company look like one the campaign objective is aimed at? If the enrichment profile is unavailable, base this on the CSV description alone and cap your confidence accordingly.
+
+Return ONLY a JSON object:
+{
+  "industry_match_score": number (0-100),
+  "company_fit_score": number (0-100),
+  "reasoning": string (2-4 sentences explaining both scores)
+}"""
 
 
 def _norm_geo(value: str) -> str:
@@ -53,24 +85,6 @@ def check_geography(company: Company, icp: ICP) -> dict:
         if members is not None and (not members or country in members):
             return {"check": "geography", "result": "pass", "detail": f"{company.country} is within region '{target}'."}
     return {"check": "geography", "result": "fail", "detail": f"{company.country} is outside the target geographies."}
-
-
-def check_industry(company: Company, icp: ICP) -> dict:
-    targets = icp.target_industries or []
-    if not targets:
-        return {"check": "industry", "result": "pass", "detail": "No industry filter set on the ICP."}
-    if not company.industry:
-        return {"check": "industry", "result": "unknown", "detail": "Company industry is missing from the CSV."}
-    best_target, best_score = None, 0.0
-    for target in targets:
-        score = fuzz.token_set_ratio(company.industry.lower(), target.lower())
-        if score > best_score:
-            best_target, best_score = target, score
-    if best_score >= INDUSTRY_MATCH_THRESHOLD:
-        return {"check": "industry", "result": "pass", "detail": f"'{company.industry}' matches '{best_target}' ({best_score:.0f}%)."}
-    if best_score >= 55:
-        return {"check": "industry", "result": "unknown", "detail": f"'{company.industry}' is a borderline match to '{best_target}' ({best_score:.0f}%) — needs review."}
-    return {"check": "industry", "result": "fail", "detail": f"'{company.industry}' does not match any target industry."}
 
 
 def _parse_range_label(label: str) -> tuple[int, int | None] | None:
@@ -106,15 +120,81 @@ def check_employee_size(company: Company, icp: ICP) -> dict:
     return {"check": "employee_size", "result": "fail", "detail": f"{count} employees is outside all target size ranges."}
 
 
-def qualify_company(company: Company, icp: ICP) -> tuple[QualificationStatus, list[dict]]:
-    checks = [check_geography(company, icp), check_industry(company, icp), check_employee_size(company, icp)]
-    results = {c["result"] for c in checks}
-    if "fail" in results:
-        status = QualificationStatus.REJECTED
-    elif "unknown" in results:
-        status = QualificationStatus.REVIEW
-    else:
+def _to_score(value) -> float:
+    try:
+        return max(0.0, min(100.0, float(value)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def score_company_fit(company: Company, icp: ICP) -> tuple[float, float, str]:
+    """One LLM call -> (industry_match_score, company_fit_score, reasoning)."""
+    profile = company.enrichment_profile
+    user_prompt = (
+        "ICP (Ideal Customer Profile):\n"
+        f"- Target industries: {icp.target_industries or []}\n"
+        f"- Fit keywords: {icp.target_keywords or []}\n"
+        f"- Campaign objective: {icp.campaign_objective or 'Not specified'}\n\n"
+        "PROSPECT COMPANY (from CSV):\n"
+        f"- Name: {company.name}\n"
+        f"- Industry: {company.industry or 'Not provided'}\n"
+        f"- Description: {company.description or 'Not provided'}\n\n"
+        "PROSPECT COMPANY (enriched from their website):\n"
+        f"{json.dumps(profile, indent=2) if profile else 'Enrichment unavailable.'}"
+    )
+    data, _ = cached_json_completion(SCORING_SYSTEM_PROMPT, user_prompt)
+    return (
+        _to_score(data.get("industry_match_score")),
+        _to_score(data.get("company_fit_score")),
+        str(data.get("reasoning") or ""),
+    )
+
+
+def qualify_company(db: Session, company: Company, icp: ICP) -> tuple[QualificationStatus, list[dict]]:
+    """Gates first (no cost), then enrichment + LLM scoring for gate passers."""
+    checks = [check_geography(company, icp), check_employee_size(company, icp)]
+    gate_results = {c["result"] for c in checks}
+
+    if "fail" in gate_results:
+        return QualificationStatus.REJECTED, checks
+    if "unknown" in gate_results:
+        return QualificationStatus.REVIEW, checks
+
+    # Both gates passed -> enrich, then score. Enrichment failure is non-fatal.
+    enrich_company(db, company)
+
+    try:
+        industry_score, fit_score, reasoning = score_company_fit(company, icp)
+    except Exception as exc:
+        logger.warning("LLM qualification scoring failed for %s: %s", company.name, exc)
+        checks.append({"check": "fit_scoring", "result": "unknown", "detail": "AI scoring failed — routed to review."})
+        return QualificationStatus.REVIEW, checks
+
+    company.industry_match_score = industry_score
+    company.company_fit_score = fit_score
+    company.qualification_reasoning = reasoning
+
+    average = round((industry_score + fit_score) / 2, 1)
+    if average > QUALIFIED_THRESHOLD:
         status = QualificationStatus.APPROVED
+        result = "pass"
+    elif average >= REVIEW_THRESHOLD:
+        status = QualificationStatus.REVIEW
+        result = "unknown"
+    else:
+        status = QualificationStatus.REJECTED
+        result = "fail"
+
+    checks.append({
+        "check": "industry_match",
+        "result": result,
+        "detail": f"Industry match score {industry_score:.0f}/100.",
+    })
+    checks.append({
+        "check": "company_fit",
+        "result": result,
+        "detail": f"Company fit score {fit_score:.0f}/100 (avg {average:.0f} -> {status.value}). {reasoning}".strip(),
+    })
     return status, checks
 
 
@@ -125,10 +205,11 @@ def qualify_import(db: Session, lead_import: LeadImport, icp: ICP) -> dict:
         if company.qualification_override:
             counts[company.qualification_status.value] = counts.get(company.qualification_status.value, 0) + 1
             continue
-        status, checks = qualify_company(company, icp)
+        status, checks = qualify_company(db, company, icp)
         company.qualification_status = status
         company.qualification_checks = checks
         counts[status.value] += 1
+        db.commit()  # commit per company so long imports survive worker restarts
     lead_import.status = ImportStatus.QUALIFIED
     db.commit()
     return counts

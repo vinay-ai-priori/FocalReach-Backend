@@ -5,6 +5,7 @@ from app.api.v1.router import api_router
 from app.core.config import settings
 from app.core.exceptions import register_exception_handlers
 from app.core.logging import configure_logging
+from app.core.rate_limit import RateLimitMiddleware
 
 configure_logging()
 
@@ -13,6 +14,8 @@ app = FastAPI(
     version="0.1.0",
     docs_url="/docs" if settings.DEBUG else None,
 )
+
+app.add_middleware(RateLimitMiddleware)
 
 app.add_middleware(
     CORSMiddleware,

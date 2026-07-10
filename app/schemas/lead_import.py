@@ -11,6 +11,7 @@ class FieldMapping(BaseModel):
     label: str
     csv_column: str | None = None
     confidence: float = 0.0
+    source: str | None = None  # exact | fuzzy | semantic | manual
     required_for: str | None = None  # company_qualification | lead_qualification | None
     is_mandatory: bool = False
 

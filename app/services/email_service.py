@@ -74,7 +74,8 @@ def generate_email_draft(
         f"- Company: {company.name} ({company.industry or 'industry unknown'}, "
         f"{company.employee_count or company.employee_range or 'size unknown'} employees, "
         f"{company.country or 'location unknown'})\n"
-        f"- Company description: {company.description or 'N/A'}\n\n"
+        f"- Company description: {company.description or 'N/A'}\n"
+        f"- Structured profile from their website: {company.enrichment_profile or 'Not available'}\n\n"
         f"RECIPIENT COMPANY WEBSITE CONTENT (for personalization):\n{enrichment[:8000] or 'Not available'}\n\n"
         f"BOOKING LINK: {settings.CALCOM_BOOKING_URL}"
     )

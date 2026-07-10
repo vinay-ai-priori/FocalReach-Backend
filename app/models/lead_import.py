@@ -42,6 +42,8 @@ class LeadImport(Base, PublicIDMixin, TimestampMixin):
 
     raw_columns: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
     column_mapping: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)  # canonical -> csv column
+    # canonical -> {confidence, source: exact|fuzzy|semantic|manual} for the mapping UI
+    mapping_meta: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
     missing_fields: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)  # validation report
     raw_rows: Mapped[list | None] = mapped_column(JSONB, nullable=True)  # kept until import confirmed
     error_message: Mapped[str | None] = mapped_column(String(1024), nullable=True)

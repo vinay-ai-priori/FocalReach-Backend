@@ -40,6 +40,7 @@ class Lead(Base, PublicIDMixin, TimestampMixin):
     country: Mapped[str | None] = mapped_column(String(255), nullable=True)
     time_in_role: Mapped[str | None] = mapped_column(String(100), nullable=True)
     time_at_company: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    years_experience: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
     # Cross-campaign deduplication (see dedup_service). A lead is flagged as a duplicate
     # when the same contact is already ACTIVE in another of the owner's campaigns; flagged
@@ -47,10 +48,15 @@ class Lead(Base, PublicIDMixin, TimestampMixin):
     is_duplicate: Mapped[bool] = mapped_column(default=False, nullable=False)
     duplicate_reason: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
-    # Deterministic scoring (0-100 each)
+    # Scoring per the Role Score & Signal Score logic document:
+    # role_score 0-30 (title tier + size modifier), signal_score 0-25 (tenure + experience),
+    # company_fit_score 0-30 (inherited from company qualification), total_score 0-85.
+    # industry_score/fit_score are legacy columns from the old 0-100 scheme, kept for data.
     industry_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     role_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     fit_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    signal_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    company_fit_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     total_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     tier: Mapped[LeadTier | None] = mapped_column(Enum(LeadTier, name="lead_tier"), nullable=True)
     score_breakdown: Mapped[dict | None] = mapped_column(JSONB, nullable=True)

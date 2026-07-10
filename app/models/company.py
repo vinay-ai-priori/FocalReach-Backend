@@ -1,6 +1,6 @@
 import enum
 
-from sqlalchemy import Enum, ForeignKey, Integer, String, Text
+from sqlalchemy import Enum, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -45,8 +45,16 @@ class Company(Base, PublicIDMixin, TimestampMixin):
     qualification_checks: Mapped[list | None] = mapped_column(JSONB, nullable=True)  # [{check, result, detail}]
     qualification_override: Mapped[bool] = mapped_column(default=False, nullable=False)  # human decision applied
 
+    # LLM qualification scores (0-100), set only for companies that pass both gates
+    industry_match_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    company_fit_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    qualification_reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     # Cached crawl of the target company site, used for email personalisation
     enrichment_content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Structured AI profile of the website (summary, offerings, keywords, ...) used for
+    # company-fit scoring and email drafting
+    enrichment_profile: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     enriched_at_status: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
     lead_import = relationship("LeadImport", back_populates="companies")
