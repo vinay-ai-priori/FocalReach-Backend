@@ -4,7 +4,7 @@ from sqlalchemy import Enum, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.base import Base, TimestampMixin
+from app.db.base import Base, PublicIDMixin, TimestampMixin
 
 
 class QualificationStatus(str, enum.Enum):
@@ -14,7 +14,7 @@ class QualificationStatus(str, enum.Enum):
     REVIEW = "review"
 
 
-class Company(Base, TimestampMixin):
+class Company(Base, PublicIDMixin, TimestampMixin):
     """A target company extracted from a lead CSV, qualified against the active ICP."""
 
     __tablename__ = "companies"

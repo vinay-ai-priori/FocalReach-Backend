@@ -3,7 +3,7 @@ import enum
 from sqlalchemy import Enum, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.base import Base, TimestampMixin
+from app.db.base import Base, PublicIDMixin, TimestampMixin
 
 
 class DraftStatus(str, enum.Enum):
@@ -13,7 +13,7 @@ class DraftStatus(str, enum.Enum):
     FAILED = "failed"
 
 
-class EmailDraft(Base, TimestampMixin):
+class EmailDraft(Base, PublicIDMixin, TimestampMixin):
     __tablename__ = "email_drafts"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

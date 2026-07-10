@@ -1,3 +1,5 @@
+from uuid import UUID
+
 from pydantic import BaseModel, ConfigDict
 
 from app.models.lead import LeadTier
@@ -7,8 +9,10 @@ class LeadOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    public_id: UUID
     lead_import_id: int
     company_id: int
+    company_name: str | None = None
     full_name: str
     first_name: str | None = None
     last_name: str | None = None

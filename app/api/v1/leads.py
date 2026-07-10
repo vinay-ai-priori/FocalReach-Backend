@@ -6,10 +6,17 @@ from app.api.deps import get_db
 from app.api.ownership import get_owned_import
 from app.models.lead import LeadTier
 from app.models.user import User
+from app.models.lead import Lead
 from app.repositories.lead_repository import LeadRepository
 from app.schemas.lead import LeadOut, PrioritizationSummary
 
 router = APIRouter(prefix="/leads", tags=["lead-prioritization"])
+
+
+def _lead_out(lead: Lead) -> LeadOut:
+    out = LeadOut.model_validate(lead)
+    out.company_name = lead.company.name if lead.company else None
+    return out
 
 
 @router.get("/imports/{import_id}", response_model=list[LeadOut])
@@ -20,7 +27,7 @@ def list_leads(
     db: Session = Depends(get_db),
 ) -> list[LeadOut]:
     get_owned_import(db, import_id, user)
-    return [LeadOut.model_validate(lead) for lead in LeadRepository(db).list_for_import(import_id, tier)]
+    return [_lead_out(lead) for lead in LeadRepository(db).list_for_import(import_id, tier)]
 
 
 @router.get("/imports/{import_id}/summary", response_model=PrioritizationSummary)

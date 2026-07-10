@@ -1,3 +1,5 @@
+from uuid import UUID
+
 from pydantic import BaseModel, ConfigDict
 
 from app.models.company import QualificationStatus
@@ -7,6 +9,7 @@ class CompanyOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    public_id: UUID
     lead_import_id: int
     name: str
     website: str | None = None

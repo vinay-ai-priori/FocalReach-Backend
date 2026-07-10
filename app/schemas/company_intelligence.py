@@ -1,4 +1,5 @@
 from datetime import datetime
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
@@ -7,6 +8,7 @@ class CompanyIntelligenceOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    public_id: UUID
     website_analysis_id: int
     company_name: str | None = None
     summary: str | None = None

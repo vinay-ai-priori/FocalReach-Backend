@@ -4,7 +4,7 @@ from sqlalchemy import Enum, ForeignKey, Integer, String
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.base import Base, TimestampMixin
+from app.db.base import Base, PublicIDMixin, TimestampMixin
 
 
 class ImportStatus(str, enum.Enum):
@@ -17,7 +17,7 @@ class ImportStatus(str, enum.Enum):
     FAILED = "failed"
 
 
-class LeadImport(Base, TimestampMixin):
+class LeadImport(Base, PublicIDMixin, TimestampMixin):
     """A single CSV upload with its column mapping and validation report."""
 
     __tablename__ = "lead_imports"

@@ -1,10 +1,10 @@
 from sqlalchemy import ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.base import Base, TimestampMixin
+from app.db.base import Base, PublicIDMixin, TimestampMixin
 
 
-class Organization(Base, TimestampMixin):
+class Organization(Base, PublicIDMixin, TimestampMixin):
     __tablename__ = "organizations"
     __table_args__ = (UniqueConstraint("tenant_id", "name", name="uq_org_tenant_name"),)
 

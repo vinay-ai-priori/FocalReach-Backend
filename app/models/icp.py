@@ -2,10 +2,10 @@ from sqlalchemy import ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.base import Base, TimestampMixin
+from app.db.base import Base, PublicIDMixin, TimestampMixin
 
 
-class ICP(Base, TimestampMixin):
+class ICP(Base, PublicIDMixin, TimestampMixin):
     """Ideal Customer Profile. AI-generated from company intelligence, then user-editable."""
 
     __tablename__ = "icps"

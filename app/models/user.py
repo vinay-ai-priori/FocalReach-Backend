@@ -4,7 +4,7 @@ from datetime import datetime
 from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.base import Base, TimestampMixin
+from app.db.base import Base, PublicIDMixin, TimestampMixin
 
 
 class UserRole(str, enum.Enum):
@@ -12,7 +12,7 @@ class UserRole(str, enum.Enum):
     USER = "user"
 
 
-class User(Base, TimestampMixin):
+class User(Base, PublicIDMixin, TimestampMixin):
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

@@ -1,4 +1,5 @@
 from datetime import datetime
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
@@ -21,6 +22,7 @@ class TenantOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    public_id: UUID
     name: str
     criteria: dict
     is_active: bool
@@ -44,6 +46,7 @@ class OrganizationOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    public_id: UUID
     tenant_id: int
     name: str
     is_active: bool

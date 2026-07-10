@@ -4,7 +4,7 @@ from sqlalchemy import Enum, Float, ForeignKey, Integer, String
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.base import Base, TimestampMixin
+from app.db.base import Base, PublicIDMixin, TimestampMixin
 
 
 class LeadTier(str, enum.Enum):
@@ -14,7 +14,7 @@ class LeadTier(str, enum.Enum):
     DEPRIORITIZED = "deprioritized"
 
 
-class Lead(Base, TimestampMixin):
+class Lead(Base, PublicIDMixin, TimestampMixin):
     """An individual prospect from the CSV, scored deterministically against the ICP."""
 
     __tablename__ = "leads"

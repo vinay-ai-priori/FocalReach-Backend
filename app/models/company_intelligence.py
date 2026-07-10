@@ -2,10 +2,10 @@ from sqlalchemy import ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.base import Base, TimestampMixin
+from app.db.base import Base, PublicIDMixin, TimestampMixin
 
 
-class CompanyIntelligence(Base, TimestampMixin):
+class CompanyIntelligence(Base, PublicIDMixin, TimestampMixin):
     """AI-generated profile of the user's own company, derived from their website content."""
 
     __tablename__ = "company_intelligences"

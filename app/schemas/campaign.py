@@ -1,4 +1,5 @@
 from datetime import datetime
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
@@ -19,6 +20,7 @@ class CampaignOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    public_id: UUID
     name: str | None = None
     status: CampaignStatus
     stage: str = "website"  # derived

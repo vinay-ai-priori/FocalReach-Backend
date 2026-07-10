@@ -2,10 +2,10 @@ from sqlalchemy import Integer, String
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.base import Base, TimestampMixin
+from app.db.base import Base, PublicIDMixin, TimestampMixin
 
 
-class Tenant(Base, TimestampMixin):
+class Tenant(Base, PublicIDMixin, TimestampMixin):
     """A cluster of organizations grouped by some criteria. Managed only by the super admin."""
 
     __tablename__ = "tenants"

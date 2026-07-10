@@ -3,7 +3,7 @@ import enum
 from sqlalchemy import Enum, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.base import Base, TimestampMixin
+from app.db.base import Base, PublicIDMixin, TimestampMixin
 
 
 class CampaignStatus(str, enum.Enum):
@@ -11,7 +11,7 @@ class CampaignStatus(str, enum.Enum):
     INACTIVE = "inactive"
 
 
-class Campaign(Base, TimestampMixin):
+class Campaign(Base, PublicIDMixin, TimestampMixin):
     """A single outbound campaign — the aggregate that ties together one run of the flow
     (website analysis → company intelligence → ICP → lead import). Private to its creating
     user. `stage` is derived on read from which artifacts exist + the lead-import status."""

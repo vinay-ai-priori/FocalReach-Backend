@@ -4,7 +4,7 @@ from sqlalchemy import Enum, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.base import Base, TimestampMixin
+from app.db.base import Base, PublicIDMixin, TimestampMixin
 
 
 class AnalysisStatus(str, enum.Enum):
@@ -17,7 +17,7 @@ class AnalysisStatus(str, enum.Enum):
     FAILED = "failed"
 
 
-class WebsiteAnalysis(Base, TimestampMixin):
+class WebsiteAnalysis(Base, PublicIDMixin, TimestampMixin):
     """One analysis per domain *per organization*. Cached: re-submitting the same domain
     within the same org reuses the row."""
 
