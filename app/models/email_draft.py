@@ -1,6 +1,7 @@
 import enum
 
 from sqlalchemy import Enum, ForeignKey, Integer, String, Text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, PublicIDMixin, TimestampMixin
@@ -29,5 +30,8 @@ class EmailDraft(Base, PublicIDMixin, TimestampMixin):
     ai_model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     ai_cached: Mapped[bool] = mapped_column(default=False, nullable=False)
     error_message: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    # Superseded versions ({subject, body, refined_with}), oldest first — the "previous
+    # drafts in this thread" context for regenerate/refine.
+    history: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
 
     lead = relationship("Lead", back_populates="email_drafts")

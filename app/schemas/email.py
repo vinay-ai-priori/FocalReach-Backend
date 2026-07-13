@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.email_draft import DraftStatus
 
@@ -28,3 +28,9 @@ class EmailDraftUpdate(BaseModel):
 
 class DraftBatchRequest(BaseModel):
     lead_ids: list[UUID] | None = None  # None = all eligible leads in the import
+
+
+class DraftRefineRequest(BaseModel):
+    mode: str = Field(
+        pattern="^(regenerate|shorter|more_technical|more_executive|more_friendly|personalize_further)$"
+    )

@@ -49,18 +49,20 @@ def _call_openai(system: str, user: str, model: str, json_mode: bool) -> str:
     return response.choices[0].message.content or ""
 
 
-def cached_completion(system: str, user: str, *, json_mode: bool = True) -> tuple[str, bool]:
-    """Returns (content, was_cached)."""
+def cached_completion(system: str, user: str, *, json_mode: bool = True, skip_cache: bool = False) -> tuple[str, bool]:
+    """Returns (content, was_cached). `skip_cache` forces a fresh API call — used when
+    the caller explicitly wants a NEW result for an identical prompt (e.g. regenerate)."""
     model = settings.OPENAI_MODEL
     key = _cache_key(system, user, model)
 
-    try:
-        cached = get_redis().get(key)
-        if cached:
-            logger.info("AI cache hit (%s...)", key[:24])
-            return cached, True
-    except Exception as exc:
-        logger.warning("Redis unavailable for AI cache read: %s", exc)
+    if not skip_cache:
+        try:
+            cached = get_redis().get(key)
+            if cached:
+                logger.info("AI cache hit (%s...)", key[:24])
+                return cached, True
+        except Exception as exc:
+            logger.warning("Redis unavailable for AI cache read: %s", exc)
 
     content = _call_openai(system, user, model, json_mode)
 
@@ -71,8 +73,8 @@ def cached_completion(system: str, user: str, *, json_mode: bool = True) -> tupl
     return content, False
 
 
-def cached_json_completion(system: str, user: str) -> tuple[dict, bool]:
-    content, was_cached = cached_completion(system, user, json_mode=True)
+def cached_json_completion(system: str, user: str, skip_cache: bool = False) -> tuple[dict, bool]:
+    content, was_cached = cached_completion(system, user, json_mode=True, skip_cache=skip_cache)
     try:
         return json.loads(content), was_cached
     except json.JSONDecodeError as exc:

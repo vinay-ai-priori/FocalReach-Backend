@@ -7,14 +7,14 @@ from sqlalchemy.orm import Session
 from app.api.auth_deps import get_current_user
 from app.api.deps import get_db
 from app.api.ownership import assert_import_owned, get_owned_import
-from app.core.exceptions import NotFoundError
+from app.core.exceptions import NotFoundError, ValidationFailedError
 from app.models.user import User
 from app.models.email_draft import DraftStatus, EmailDraft
 from app.models.lead import LeadTier
 from app.repositories.email_draft_repository import EmailDraftRepository
 from app.repositories.lead_repository import LeadRepository
 from app.schemas.common import TaskAccepted
-from app.schemas.email import DraftBatchRequest, EmailDraftOut, EmailDraftUpdate
+from app.schemas.email import DraftBatchRequest, DraftRefineRequest, EmailDraftOut, EmailDraftUpdate
 from app.tasks.email_tasks import draft_email_task
 
 router = APIRouter(prefix="/outreach", tags=["outreach"])
@@ -119,6 +119,27 @@ def get_draft(lead_id: UUID, user: User = Depends(get_current_user), db: Session
     if not draft:
         raise NotFoundError("No draft exists for this lead yet.")
     assert_import_owned(draft.lead.lead_import, user)
+    return _draft_out(draft)
+
+
+@router.post("/drafts/{draft_id}/refine", response_model=EmailDraftOut)
+def refine_draft(
+    draft_id: UUID, payload: DraftRefineRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> EmailDraftOut:
+    """Queue a regenerate/refine pass on an existing draft. The rewrite happens in
+    Celery; the draft flips to GENERATING immediately and the UI's polling picks up
+    the READY result."""
+    repo = EmailDraftRepository(db)
+    draft = repo.get_by_public_id(draft_id)
+    if not draft:
+        raise NotFoundError(f"Draft {draft_id} not found.")
+    assert_import_owned(draft.lead.lead_import, user)
+    if draft.status in (DraftStatus.PENDING, DraftStatus.GENERATING):
+        raise ValidationFailedError("This draft is still being generated — try again once it's ready.")
+    draft.status = DraftStatus.PENDING
+    draft.error_message = None
+    db.commit()
+    draft_email_task.delay(draft.id, payload.mode)
     return _draft_out(draft)
 
 

@@ -4,11 +4,13 @@ from sqlalchemy.orm import Session
 from app.api.auth_deps import get_current_user
 from app.api.deps import get_db
 from app.models.user import User
+from app.repositories.user_repository import UserRepository
 from app.schemas.auth import (
     ChangePasswordRequest,
     ForgotPasswordRequest,
     LoginRequest,
     LogoutRequest,
+    ProfileSetupRequest,
     RefreshRequest,
     TokenResponse,
     UserOut,
@@ -45,6 +47,16 @@ def logout(payload: LogoutRequest, db: Session = Depends(get_db)) -> Message:
 
 @router.get("/me", response_model=UserOut)
 def me(user: User = Depends(get_current_user)) -> UserOut:
+    return _user_out(user)
+
+
+@router.post("/setup-profile", response_model=UserOut)
+def setup_profile(
+    payload: ProfileSetupRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> UserOut:
+    """Update the signed-in user's own profile. Email, role, and organization are
+    identity/authorization fields — only admins change those (admin panel)."""
+    user = UserRepository(db).update(user, full_name=payload.full_name.strip())
     return _user_out(user)
 
 
