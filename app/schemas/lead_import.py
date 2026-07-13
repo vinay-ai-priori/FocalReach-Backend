@@ -31,9 +31,8 @@ class ColumnMappingUpdate(BaseModel):
 class LeadImportOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    id: int
     public_id: UUID
-    icp_id: int
+    icp_public_id: UUID | None = None
     filename: str
     status: ImportStatus
     total_rows: int
@@ -66,3 +65,8 @@ class ImportValidationOut(BaseModel):
     missing_fields: list[MissingFieldWarning]
     sample_rows: list[dict]
     stats: ImportStats
+    # Re-upload resolution (campaigns that already ran). "initial" for a first upload.
+    upload_mode: str = "initial"  # initial | blocked | append | rerun
+    inputs_changed: bool = False
+    campaign_new_leads: int | None = None  # importable rows not yet in this campaign
+    campaign_existing_leads: int | None = None  # importable rows already in this campaign

@@ -20,7 +20,6 @@ class CrawledPage(BaseModel):
 class WebsiteAnalysisOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    id: int
     public_id: UUID
     url: str
     domain: str

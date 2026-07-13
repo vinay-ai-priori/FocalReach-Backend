@@ -1,3 +1,5 @@
+from uuid import UUID
+
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
@@ -15,8 +17,14 @@ from app.services.icp_service import generate_icp, update_icp
 router = APIRouter(prefix="/icps", tags=["icp"])
 
 
-def _get_owned_icp(icp_id: int, user: User, db: Session) -> ICP:
-    icp = ICPRepository(db).get(icp_id)
+def _icp_out(icp: ICP) -> ICPOut:
+    out = ICPOut.model_validate(icp)
+    out.company_intelligence_public_id = icp.company_intelligence.public_id if icp.company_intelligence else None
+    return out
+
+
+def _get_owned_icp(icp_id: UUID, user: User, db: Session) -> ICP:
+    icp = ICPRepository(db).get_by_public_id(icp_id)
     if not icp:
         raise NotFoundError(f"ICP {icp_id} not found.")
     if icp.user_id is not None and icp.user_id != user.id:
@@ -29,27 +37,27 @@ def generate(
     payload: ICPGenerateRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)
 ) -> ICPOut:
     """Generate (or return the user's existing active) ICP for a company intelligence profile."""
-    intelligence = CompanyIntelligenceRepository(db).get(payload.company_intelligence_id)
+    intelligence = CompanyIntelligenceRepository(db).get_by_public_id(payload.company_intelligence_id)
     if not intelligence:
         raise NotFoundError(f"Company intelligence {payload.company_intelligence_id} not found.")
     icp = generate_icp(db, intelligence, user_id=user.id)
     if payload.campaign_id:
-        campaign = CampaignRepository(db).get(payload.campaign_id)
+        campaign = CampaignRepository(db).get_by_public_id(payload.campaign_id)
         if campaign and campaign.user_id == user.id:
             CampaignRepository(db).update(
                 campaign, company_intelligence_id=intelligence.id, icp_id=icp.id
             )
-    return ICPOut.model_validate(icp)
+    return _icp_out(icp)
 
 
 @router.get("/{icp_id}", response_model=ICPOut)
-def get_icp(icp_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> ICPOut:
-    return ICPOut.model_validate(_get_owned_icp(icp_id, user, db))
+def get_icp(icp_id: UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> ICPOut:
+    return _icp_out(_get_owned_icp(icp_id, user, db))
 
 
 @router.patch("/{icp_id}", response_model=ICPOut)
 def patch_icp(
-    icp_id: int, payload: ICPUpdateRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+    icp_id: UUID, payload: ICPUpdateRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)
 ) -> ICPOut:
-    _get_owned_icp(icp_id, user, db)
-    return ICPOut.model_validate(update_icp(db, icp_id, payload.model_dump(exclude_unset=True)))
+    icp = _get_owned_icp(icp_id, user, db)
+    return _icp_out(update_icp(db, icp.id, payload.model_dump(exclude_unset=True)))

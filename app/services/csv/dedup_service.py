@@ -103,18 +103,25 @@ class DedupIndex:
         return False, None, True
 
 
-def build_dedup_index(db: Session, organization_id: int | None, exclude_import_id: int | None) -> DedupIndex:
+def build_dedup_index(
+    db: Session, organization_id: int | None, exclude_import_ids: set[int] | int | None
+) -> DedupIndex:
+    """`exclude_import_ids` must contain the import being validated AND the campaign's own
+    permanent import (when re-uploading) — a campaign must never dedup against itself."""
     index = DedupIndex()
     if organization_id is None:
         return index
+    if isinstance(exclude_import_ids, int):
+        exclude_import_ids = {exclude_import_ids}
+    excluded = {i for i in (exclude_import_ids or set()) if i is not None}
     stmt = (
         select(Lead, Company)
         .join(Company, Lead.company_id == Company.id)
         .join(LeadImport, Lead.lead_import_id == LeadImport.id)
         .where(LeadImport.organization_id == organization_id, Lead.is_duplicate.is_(False))
     )
-    if exclude_import_id is not None:
-        stmt = stmt.where(LeadImport.id != exclude_import_id)
+    if excluded:
+        stmt = stmt.where(LeadImport.id.not_in(excluded))
 
     for lead, company in db.execute(stmt).all():
         active = lead.tier != LeadTier.DEPRIORITIZED  # unscored (tier None) counts as active
@@ -127,7 +134,15 @@ def compute_dedup_stats(db: Session, lead_import: LeadImport) -> dict:
     Only rows that would actually be imported (see classify_row) are considered."""
     from app.services.csv.import_service import classify_row
 
-    index = build_dedup_index(db, lead_import.organization_id, lead_import.id)
+    excluded = {lead_import.id}
+    if lead_import.campaign_id is not None:
+        # Pending re-upload: also exclude the campaign's own permanent import.
+        from app.models.campaign import Campaign
+
+        campaign = db.get(Campaign, lead_import.campaign_id)
+        if campaign and campaign.lead_import_id:
+            excluded.add(campaign.lead_import_id)
+    index = build_dedup_index(db, lead_import.organization_id, excluded)
     mapping = lead_import.column_mapping or {}
     rows = lead_import.raw_rows or []
 

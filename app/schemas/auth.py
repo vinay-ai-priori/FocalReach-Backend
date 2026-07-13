@@ -31,12 +31,11 @@ class ForgotPasswordRequest(BaseModel):
 class UserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    id: int
     public_id: UUID
     email: str
     full_name: str
     role: UserRole
-    organization_id: int | None = None
+    organization_public_id: UUID | None = None
     is_active: bool
     must_change_password: bool
     last_login_at: datetime | None = None

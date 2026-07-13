@@ -7,9 +7,8 @@ from pydantic import BaseModel, ConfigDict
 class CompanyIntelligenceOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    id: int
     public_id: UUID
-    website_analysis_id: int
+    website_analysis_public_id: UUID | None = None
     company_name: str | None = None
     summary: str | None = None
     industry: str | None = None

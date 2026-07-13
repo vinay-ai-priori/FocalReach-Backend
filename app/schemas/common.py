@@ -1,3 +1,5 @@
+from uuid import UUID
+
 from pydantic import BaseModel
 
 
@@ -8,4 +10,4 @@ class Message(BaseModel):
 class TaskAccepted(BaseModel):
     task_id: str | None = None
     status: str
-    resource_id: int
+    resource_id: UUID

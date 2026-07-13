@@ -1,5 +1,7 @@
 """Administration panel API — every route is super-admin-only via the router-level guard."""
 
+from uuid import UUID
+
 from fastapi import APIRouter, Depends
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -56,9 +58,9 @@ def create_tenant(payload: TenantCreate, db: Session = Depends(get_db)) -> Tenan
 
 
 @router.patch("/tenants/{tenant_id}", response_model=TenantOut)
-def update_tenant(tenant_id: int, payload: TenantUpdate, db: Session = Depends(get_db)) -> TenantOut:
+def update_tenant(tenant_id: UUID, payload: TenantUpdate, db: Session = Depends(get_db)) -> TenantOut:
     repo = TenantRepository(db)
-    tenant = repo.get(tenant_id)
+    tenant = repo.get_by_public_id(tenant_id)
     if not tenant:
         raise NotFoundError(f"Tenant {tenant_id} not found.")
     fields = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
@@ -68,11 +70,11 @@ def update_tenant(tenant_id: int, payload: TenantUpdate, db: Session = Depends(g
 
 
 @router.delete("/tenants/{tenant_id}", response_model=Message)
-def delete_tenant(tenant_id: int, db: Session = Depends(get_db)) -> Message:
+def delete_tenant(tenant_id: UUID, db: Session = Depends(get_db)) -> Message:
     """Hard delete. Cascades to the tenant's organizations; users in those orgs are detached
     (organization set to NULL), not deleted."""
     repo = TenantRepository(db)
-    tenant = repo.get(tenant_id)
+    tenant = repo.get_by_public_id(tenant_id)
     if not tenant:
         raise NotFoundError(f"Tenant {tenant_id} not found.")
     repo.delete(tenant)
@@ -85,6 +87,7 @@ def _org_out(db: Session, org: Organization) -> OrganizationOut:
     out = OrganizationOut.model_validate(org)
     out.user_count = count
     out.tenant_name = org.tenant.name if org.tenant else None
+    out.tenant_public_id = org.tenant.public_id if org.tenant else None
     return out
 
 
@@ -95,36 +98,42 @@ def list_organizations(db: Session = Depends(get_db)) -> list[OrganizationOut]:
 
 @router.post("/organizations", response_model=OrganizationOut)
 def create_organization(payload: OrganizationCreate, db: Session = Depends(get_db)) -> OrganizationOut:
-    if not TenantRepository(db).get(payload.tenant_id):
+    tenant = TenantRepository(db).get_by_public_id(payload.tenant_id)
+    if not tenant:
         raise NotFoundError(f"Tenant {payload.tenant_id} not found.")
     existing = db.scalar(
         select(Organization).where(
-            Organization.tenant_id == payload.tenant_id, Organization.name == payload.name.strip()
+            Organization.tenant_id == tenant.id, Organization.name == payload.name.strip()
         )
     )
     if existing:
         raise ConflictError(f"Organization '{payload.name}' already exists in this tenant.")
-    org = OrganizationRepository(db).create(Organization(tenant_id=payload.tenant_id, name=payload.name.strip()))
+    org = OrganizationRepository(db).create(Organization(tenant_id=tenant.id, name=payload.name.strip()))
     return _org_out(db, org)
 
 
 @router.patch("/organizations/{org_id}", response_model=OrganizationOut)
-def update_organization(org_id: int, payload: OrganizationUpdate, db: Session = Depends(get_db)) -> OrganizationOut:
+def update_organization(org_id: UUID, payload: OrganizationUpdate, db: Session = Depends(get_db)) -> OrganizationOut:
     repo = OrganizationRepository(db)
-    org = repo.get(org_id)
+    org = repo.get_by_public_id(org_id)
     if not org:
         raise NotFoundError(f"Organization {org_id} not found.")
     fields = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
+    if "tenant_id" in fields:
+        tenant = TenantRepository(db).get_by_public_id(fields["tenant_id"])
+        if not tenant:
+            raise NotFoundError(f"Tenant {fields['tenant_id']} not found.")
+        fields["tenant_id"] = tenant.id
     if fields:
         org = repo.update(org, **fields)
     return _org_out(db, org)
 
 
 @router.delete("/organizations/{org_id}", response_model=Message)
-def delete_organization(org_id: int, db: Session = Depends(get_db)) -> Message:
+def delete_organization(org_id: UUID, db: Session = Depends(get_db)) -> Message:
     """Hard delete. Users of this organization are detached (organization set to NULL)."""
     repo = OrganizationRepository(db)
-    org = repo.get(org_id)
+    org = repo.get_by_public_id(org_id)
     if not org:
         raise NotFoundError(f"Organization {org_id} not found.")
     repo.delete(org)
@@ -135,12 +144,14 @@ def delete_organization(org_id: int, db: Session = Depends(get_db)) -> Message:
 def _user_out(user: User) -> AdminUserOut:
     out = AdminUserOut.model_validate(user)
     out.organization_name = user.organization.name if user.organization else None
+    out.organization_public_id = user.organization.public_id if user.organization else None
     return out
 
 
 @router.get("/users", response_model=list[AdminUserOut])
-def list_users(organization_id: int | None = None, db: Session = Depends(get_db)) -> list[AdminUserOut]:
-    return [_user_out(u) for u in UserRepository(db).list_all(organization_id)]
+def list_users(organization_id: UUID | None = None, db: Session = Depends(get_db)) -> list[AdminUserOut]:
+    org = OrganizationRepository(db).get_by_public_id(organization_id) if organization_id else None
+    return [_user_out(u) for u in UserRepository(db).list_all(org.id if org else None)]
 
 
 @router.post("/users", response_model=AdminUserOut)
@@ -149,7 +160,8 @@ def create_user(payload: UserCreate, admin: User = Depends(require_super_admin),
     email = payload.email.strip().lower()
     if repo.get_by_email(email):
         raise ConflictError(f"An account with email '{email}' already exists.")
-    if not OrganizationRepository(db).get(payload.organization_id):
+    org = OrganizationRepository(db).get_by_public_id(payload.organization_id)
+    if not org:
         raise NotFoundError(f"Organization {payload.organization_id} not found.")
     error = validate_password_strength(payload.password)
     if error:
@@ -159,7 +171,7 @@ def create_user(payload: UserCreate, admin: User = Depends(require_super_admin),
             full_name=payload.full_name.strip(),
             email=email,
             hashed_password=hash_password(payload.password),
-            organization_id=payload.organization_id,
+            organization_id=org.id,
             role=UserRole.USER,  # only the CLI seed can create a super admin
             must_change_password=True,
             created_by_id=admin.id,
@@ -169,9 +181,9 @@ def create_user(payload: UserCreate, admin: User = Depends(require_super_admin),
 
 
 @router.patch("/users/{user_id}", response_model=AdminUserOut)
-def update_user(user_id: int, payload: UserUpdate, db: Session = Depends(get_db)) -> AdminUserOut:
+def update_user(user_id: UUID, payload: UserUpdate, db: Session = Depends(get_db)) -> AdminUserOut:
     repo = UserRepository(db)
-    user = repo.get(user_id)
+    user = repo.get_by_public_id(user_id)
     if not user:
         raise NotFoundError(f"User {user_id} not found.")
     if user.role == UserRole.SUPER_ADMIN:
@@ -186,8 +198,11 @@ def update_user(user_id: int, payload: UserUpdate, db: Session = Depends(get_db)
             raise ValidationFailedError(error)
         fields["hashed_password"] = hash_password(new_password)
         fields["must_change_password"] = True
-    if "organization_id" in fields and not OrganizationRepository(db).get(fields["organization_id"]):
-        raise NotFoundError(f"Organization {fields['organization_id']} not found.")
+    if "organization_id" in fields:
+        org = OrganizationRepository(db).get_by_public_id(fields["organization_id"])
+        if not org:
+            raise NotFoundError(f"Organization {fields['organization_id']} not found.")
+        fields["organization_id"] = org.id
 
     if fields:
         user = repo.update(user, **fields)
@@ -197,11 +212,11 @@ def update_user(user_id: int, payload: UserUpdate, db: Session = Depends(get_db)
 
 
 @router.delete("/users/{user_id}", response_model=Message)
-def delete_user(user_id: int, db: Session = Depends(get_db)) -> Message:
+def delete_user(user_id: UUID, db: Session = Depends(get_db)) -> Message:
     """Hard delete. The user's campaigns remain in the database (detached from the account)
     and still count toward organization-level deduplication."""
     repo = UserRepository(db)
-    user = repo.get(user_id)
+    user = repo.get_by_public_id(user_id)
     if not user:
         raise NotFoundError(f"User {user_id} not found.")
     if user.role == UserRole.SUPER_ADMIN:

@@ -19,16 +19,22 @@ from app.services import auth_service
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
+def _user_out(user: User) -> UserOut:
+    out = UserOut.model_validate(user)
+    out.organization_public_id = user.organization.public_id if user.organization else None
+    return out
+
+
 @router.post("/login", response_model=TokenResponse)
 def login(payload: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse:
     user, tokens = auth_service.login(db, payload.email, payload.password)
-    return TokenResponse(**tokens, user=UserOut.model_validate(user))
+    return TokenResponse(**tokens, user=_user_out(user))
 
 
 @router.post("/refresh", response_model=TokenResponse)
 def refresh(payload: RefreshRequest, db: Session = Depends(get_db)) -> TokenResponse:
     user, tokens = auth_service.refresh(db, payload.refresh_token)
-    return TokenResponse(**tokens, user=UserOut.model_validate(user))
+    return TokenResponse(**tokens, user=_user_out(user))
 
 
 @router.post("/logout", response_model=Message)
@@ -39,7 +45,7 @@ def logout(payload: LogoutRequest, db: Session = Depends(get_db)) -> Message:
 
 @router.get("/me", response_model=UserOut)
 def me(user: User = Depends(get_current_user)) -> UserOut:
-    return UserOut.model_validate(user)
+    return _user_out(user)
 
 
 @router.post("/change-password", response_model=TokenResponse)
@@ -47,7 +53,7 @@ def change_password(
     payload: ChangePasswordRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)
 ) -> TokenResponse:
     tokens = auth_service.change_password(db, user, payload.current_password, payload.new_password)
-    return TokenResponse(**tokens, user=UserOut.model_validate(user))
+    return TokenResponse(**tokens, user=_user_out(user))
 
 
 @router.post("/forget-password", response_model=Message)

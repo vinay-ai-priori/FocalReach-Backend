@@ -21,7 +21,6 @@ class TenantUpdate(BaseModel):
 class TenantOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    id: int
     public_id: UUID
     name: str
     criteria: dict
@@ -32,22 +31,21 @@ class TenantOut(BaseModel):
 
 # ---------- Organizations ----------
 class OrganizationCreate(BaseModel):
-    tenant_id: int
+    tenant_id: UUID
     name: str = Field(min_length=2, max_length=255)
 
 
 class OrganizationUpdate(BaseModel):
     name: str | None = None
-    tenant_id: int | None = None
+    tenant_id: UUID | None = None
     is_active: bool | None = None
 
 
 class OrganizationOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    id: int
     public_id: UUID
-    tenant_id: int
+    tenant_public_id: UUID | None = None
     name: str
     is_active: bool
     created_at: datetime
@@ -60,12 +58,12 @@ class UserCreate(BaseModel):
     full_name: str = Field(min_length=2, max_length=255)
     email: EmailStr
     password: str = Field(min_length=8)
-    organization_id: int
+    organization_id: UUID
 
 
 class UserUpdate(BaseModel):
     full_name: str | None = None
-    organization_id: int | None = None
+    organization_id: UUID | None = None
     is_active: bool | None = None
     new_password: str | None = Field(default=None, min_length=8)
 

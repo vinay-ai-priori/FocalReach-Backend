@@ -8,10 +8,9 @@ from app.models.lead import LeadTier
 class LeadOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    id: int
     public_id: UUID
-    lead_import_id: int
-    company_id: int
+    lead_import_public_id: UUID | None = None
+    company_public_id: UUID | None = None
     company_name: str | None = None
     full_name: str
     first_name: str | None = None

@@ -198,18 +198,38 @@ def qualify_company(db: Session, company: Company, icp: ICP) -> tuple[Qualificat
     return status, checks
 
 
+# Commit every N qualified companies: batching cuts DB round-trips while keeping the
+# uncommitted window small (both for RAM held and for progress lost on a worker restart).
+QUALIFY_COMMIT_BATCH_SIZE = 10
+
+
+# Big per-company payloads (crawled website text, AI profile, check details). The session
+# runs with expire_on_commit=False, so once committed these would otherwise sit in RAM for
+# the whole task — expire them right after their batch commits so the memory is reclaimed.
+_HEAVY_COMPANY_FIELDS = ["enrichment_content", "enrichment_profile", "qualification_checks"]
+
+
 def qualify_import(db: Session, lead_import: LeadImport, icp: ICP) -> dict:
     repo = CompanyRepository(db)
     counts = {"approved": 0, "rejected": 0, "review": 0}
+    batch: list = []
     for company in repo.list_for_import(lead_import.id):
-        if company.qualification_override:
+        # Skip human decisions AND companies already qualified in a previous run of this
+        # import (append mode: only new companies enter the pipeline). A re-run clears
+        # qualification_checks/override first, so those are re-processed here.
+        if company.qualification_override or company.qualification_checks is not None:
             counts[company.qualification_status.value] = counts.get(company.qualification_status.value, 0) + 1
             continue
         status, checks = qualify_company(db, company, icp)
         company.qualification_status = status
         company.qualification_checks = checks
         counts[status.value] += 1
-        db.commit()  # commit per company so long imports survive worker restarts
+        batch.append(company)
+        if len(batch) >= QUALIFY_COMMIT_BATCH_SIZE:
+            db.commit()  # flush the batch so long imports survive worker restarts
+            for done in batch:
+                db.expire(done, _HEAVY_COMPANY_FIELDS)
+            batch = []
     lead_import.status = ImportStatus.QUALIFIED
-    db.commit()
+    db.commit()  # final commit covers any remaining partial batch
     return counts

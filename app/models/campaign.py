@@ -46,4 +46,6 @@ class Campaign(Base, PublicIDMixin, TimestampMixin):
     website_analysis = relationship("WebsiteAnalysis")
     company_intelligence = relationship("CompanyIntelligence")
     icp = relationship("ICP")
-    lead_import = relationship("LeadImport")
+    # Two FK paths exist between campaigns and lead_imports (this one, plus
+    # lead_imports.campaign_id used by pending re-uploads) — pin the FK explicitly.
+    lead_import = relationship("LeadImport", foreign_keys=[lead_import_id])

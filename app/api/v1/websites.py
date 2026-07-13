@@ -1,3 +1,5 @@
+from uuid import UUID
+
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
@@ -63,8 +65,8 @@ def analyze_website(
 
 
 @router.get("/{analysis_id}", response_model=WebsiteAnalysisOut)
-def get_analysis(analysis_id: int, db: Session = Depends(get_db)) -> WebsiteAnalysisOut:
-    analysis = WebsiteAnalysisRepository(db).get(analysis_id)
+def get_analysis(analysis_id: UUID, db: Session = Depends(get_db)) -> WebsiteAnalysisOut:
+    analysis = WebsiteAnalysisRepository(db).get_by_public_id(analysis_id)
     if not analysis:
         raise NotFoundError(f"Analysis {analysis_id} not found.")
     return WebsiteAnalysisOut.model_validate(analysis)

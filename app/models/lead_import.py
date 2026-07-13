@@ -34,6 +34,15 @@ class LeadImport(Base, PublicIDMixin, TimestampMixin):
         ForeignKey("organizations.id", ondelete="SET NULL"), nullable=True, index=True
     )
 
+    # Set only on PENDING re-uploads: a candidate dataset awaiting confirmation into the
+    # campaign's permanent import. NULL on the permanent import itself.
+    campaign_id: Mapped[int | None] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    # Fingerprint of the result-affecting ICP fields at the moment this import last ran.
+    # Compared against the current ICP to detect "inputs changed" (stale results / re-run).
+    icp_snapshot_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
     filename: Mapped[str] = mapped_column(String(512), nullable=False)
     status: Mapped[ImportStatus] = mapped_column(
         Enum(ImportStatus, name="import_status"), default=ImportStatus.MAPPING, nullable=False

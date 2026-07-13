@@ -1,4 +1,5 @@
 from typing import Generic, Iterable, Type, TypeVar
+from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -16,6 +17,10 @@ class BaseRepository(Generic[ModelT]):
 
     def get(self, id_: int) -> ModelT | None:
         return self.db.get(self.model, id_)
+
+    def get_by_public_id(self, public_id: UUID) -> ModelT | None:
+        stmt = select(self.model).where(self.model.public_id == public_id)
+        return self.db.scalars(stmt).first()
 
     def list(self, *, limit: int = 500, offset: int = 0) -> list[ModelT]:
         stmt = select(self.model).order_by(self.model.id.desc()).limit(limit).offset(offset)

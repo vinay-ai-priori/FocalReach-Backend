@@ -20,6 +20,9 @@ class ICP(Base, PublicIDMixin, TimestampMixin):
     )
 
     campaign_objective: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The AI-generated candidates campaign_objective was chosen from (empty for
+    # ICPs created before this field existed, or once fully hand-written).
+    campaign_objective_options: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
     target_industries: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
     company_size_ranges: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)  # [{min, max, label}]
     target_roles: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)

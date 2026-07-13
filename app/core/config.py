@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
     # Cosine-similarity floor for the semantic column-matching tier (0-1).
     SEMANTIC_MATCH_THRESHOLD: float = 0.55
+    # Cosine-similarity floor for a lead title to count as EXACTLY one of the ICP's
+    # target roles (full role score). Deliberately strict — paraphrases of the same
+    # role pass ("VP of Ops" ~ "Vice President Operations"); adjacent roles don't.
+    ROLE_MATCH_THRESHOLD: float = 0.80
     AI_CACHE_TTL_SECONDS: int = 7 * 24 * 3600
 
     # Website intelligence

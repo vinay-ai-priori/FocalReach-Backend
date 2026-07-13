@@ -37,8 +37,20 @@ def derive_stage(campaign: Campaign) -> str:
 
 
 def to_out(campaign: Campaign) -> CampaignOut:
+    from app.services.csv.reupload_service import icp_fingerprint
+
     out = CampaignOut.model_validate(campaign)
     out.stage = derive_stage(campaign)
     out.analysis_status = campaign.website_analysis.status.value if campaign.website_analysis else None
     out.import_status = campaign.lead_import.status.value if campaign.lead_import else None
+    out.website_analysis_public_id = campaign.website_analysis.public_id if campaign.website_analysis else None
+    out.company_intelligence_public_id = campaign.company_intelligence.public_id if campaign.company_intelligence else None
+    out.icp_public_id = campaign.icp.public_id if campaign.icp else None
+    out.lead_import_public_id = campaign.lead_import.public_id if campaign.lead_import else None
+    out.results_stale = bool(
+        campaign.icp
+        and campaign.lead_import
+        and campaign.lead_import.icp_snapshot_hash
+        and campaign.lead_import.icp_snapshot_hash != icp_fingerprint(campaign.icp)
+    )
     return out

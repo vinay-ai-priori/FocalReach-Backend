@@ -8,9 +8,8 @@ from app.models.company import QualificationStatus
 class CompanyOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    id: int
     public_id: UUID
-    lead_import_id: int
+    lead_import_public_id: UUID | None = None
     name: str
     website: str | None = None
     domain: str | None = None

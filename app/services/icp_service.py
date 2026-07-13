@@ -11,7 +11,7 @@ from app.services.ai.openai_client import cached_json_completion
 SYSTEM_PROMPT = """You are a B2B go-to-market strategist. Given a company profile, generate their Ideal Customer Profile for outbound sales.
 Return ONLY a JSON object with exactly these keys:
 {
-  "campaign_objective": string (one sentence, e.g. "Book discovery calls with ops leaders at mid-market manufacturers"),
+  "campaign_objectives": [string, string, string] (exactly 3 distinct one-sentence options, each a plausible campaign goal, e.g. "Book discovery calls with ops leaders at mid-market manufacturers" — vary the angle across the 3: e.g. one focused on booking meetings, one on a specific buyer pain point, one on a specific segment or use case),
   "target_industries": [string] (4-6 industries most likely to buy),
   "company_size_ranges": [{"min": int, "max": int or null, "label": string}] (e.g. {"min": 201, "max": 1000, "label": "201-1,000"}),
   "target_roles": [string] (5-7 job titles of likely buyers),
@@ -41,10 +41,13 @@ def generate_icp(db: Session, intelligence: CompanyIntelligence, user_id: int | 
     )
     data, _ = cached_json_completion(SYSTEM_PROMPT, user_prompt)
 
+    objectives = [o for o in (data.get("campaign_objectives") or []) if isinstance(o, str) and o.strip()]
+
     icp = ICP(
         company_intelligence_id=intelligence.id,
         user_id=user_id,
-        campaign_objective=data.get("campaign_objective"),
+        campaign_objective=objectives[0] if objectives else None,
+        campaign_objective_options=objectives,
         target_industries=data.get("target_industries") or [],
         company_size_ranges=data.get("company_size_ranges") or [],
         target_roles=data.get("target_roles") or [],

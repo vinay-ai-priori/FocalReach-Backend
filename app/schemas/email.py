@@ -9,9 +9,8 @@ from app.models.email_draft import DraftStatus
 class EmailDraftOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    id: int
     public_id: UUID
-    lead_id: int
+    lead_public_id: UUID | None = None
     status: DraftStatus
     subject: str | None = None
     body: str | None = None
@@ -28,4 +27,4 @@ class EmailDraftUpdate(BaseModel):
 
 
 class DraftBatchRequest(BaseModel):
-    lead_ids: list[int] | None = None  # None = all hot+warm leads in the import
+    lead_ids: list[UUID] | None = None  # None = all eligible leads in the import

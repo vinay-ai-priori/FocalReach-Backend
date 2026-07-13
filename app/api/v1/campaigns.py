@@ -1,3 +1,5 @@
+from uuid import UUID
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
@@ -17,8 +19,8 @@ from app.tasks.website_tasks import analyze_website_task
 router = APIRouter(prefix="/campaigns", tags=["campaigns"])
 
 
-def _get_owned(db: Session, campaign_id: int, user: User) -> Campaign:
-    campaign = CampaignRepository(db).get(campaign_id)
+def _get_owned(db: Session, campaign_id: UUID, user: User) -> Campaign:
+    campaign = CampaignRepository(db).get_by_public_id(campaign_id)
     if not campaign:
         raise NotFoundError(f"Campaign {campaign_id} not found.")
     if campaign.user_id is not None and campaign.user_id != user.id:
@@ -75,13 +77,13 @@ def list_campaigns(
 
 
 @router.get("/{campaign_id}", response_model=CampaignOut)
-def get_campaign(campaign_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> CampaignOut:
+def get_campaign(campaign_id: UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> CampaignOut:
     return to_out(_get_owned(db, campaign_id, user))
 
 
 @router.patch("/{campaign_id}", response_model=CampaignOut)
 def update_campaign(
-    campaign_id: int, payload: CampaignUpdate, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+    campaign_id: UUID, payload: CampaignUpdate, user: User = Depends(get_current_user), db: Session = Depends(get_db)
 ) -> CampaignOut:
     campaign = _get_owned(db, campaign_id, user)
     fields = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
@@ -92,7 +94,7 @@ def update_campaign(
 
 @router.delete("/{campaign_id}", response_model=CampaignOut)
 def delete_campaign(
-    campaign_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+    campaign_id: UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)
 ) -> CampaignOut:
     """Delete the campaign aggregate. Its leads stay in the DB for org-level dedup."""
     campaign = _get_owned(db, campaign_id, user)

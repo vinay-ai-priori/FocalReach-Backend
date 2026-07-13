@@ -1,10 +1,15 @@
 """Lead prioritization per the "Role Score & Signal Score — Logic Document".
 
-Fully deterministic — pure if/else logic, no AI, fully auditable.
+Deterministic and fully auditable. Role scoring runs in two phases:
+- Phase 1 — ICP role match: if the lead's title semantically matches one of the ICP
+  Builder's target roles (embedding cosine >= ROLE_MATCH_THRESHOLD, i.e. effectively
+  the same role), award the full role score.
+- Phase 2 — fallback: otherwise score from the fixed tier table below, exactly as
+  before. Signal and company-fit are unchanged (pure if/else, no AI).
 
 Three dimensions:
-- role_score (max 30): job-title keyword match against a fixed tier table, then a
-  company-size modifier. (Doc Part 1)
+- role_score (max 30): ICP target-role match (full score) or job-title keyword match
+  against a fixed tier table with a company-size modifier. (Doc Part 1)
 - signal_score (max 30): tenure in current role (12) + total career experience (13),
   from fixed bracket tables. (Doc Part 2)
 - company_fit_score (max 40): average of the company's LLM qualification scores
@@ -24,10 +29,15 @@ import re
 
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
+from app.core.logging import get_logger
 from app.models.icp import ICP
 from app.models.lead import Lead, LeadTier
 from app.models.lead_import import ImportStatus, LeadImport
 from app.repositories.lead_repository import LeadRepository
+from app.services.ai.embedding_service import cosine, get_header_vectors, normalize_header
+
+logger = get_logger(__name__)
 
 # Dimension maxima with engagement's 15 points redistributed (+5 signal, +10 company fit).
 ROLE_MAX = 30    # document base: 30 (unchanged)
@@ -113,7 +123,51 @@ def _size_modifier(tier_index: int | None, employee_count: int | None) -> tuple[
     return delta, f"{bracket} employees: {'+' if delta >= 0 else ''}{delta} for tier {tier_index + 1}."
 
 
-def score_role(lead: Lead) -> tuple[float, str]:
+def build_role_match_index(db: Session, icp: ICP, titles: list[str | None]) -> dict[str, tuple[str, float]]:
+    """Phase 1 pre-pass: {normalized title -> (matched ICP role, similarity)} for every
+    unique lead title that matches one of the ICP's target roles at or above the strict
+    threshold. Embeddings are batched and Postgres-cached (one API call for the misses),
+    so cost is per unique text, not per lead. Returns {} when the ICP has no target
+    roles or the embedding call fails — scoring then falls back to tier logic alone."""
+    roles = [r.strip() for r in (icp.target_roles or []) if isinstance(r, str) and r.strip()]
+    unique_titles = sorted({normalize_header(t) for t in titles if t and t.strip()})
+    if not roles or not unique_titles:
+        return {}
+    try:
+        vectors = get_header_vectors(db, roles + unique_titles)
+    except Exception as exc:
+        logger.warning("Role-match embeddings unavailable, falling back to tier logic: %s", exc)
+        return {}
+
+    role_vectors = [(r, vectors.get(normalize_header(r))) for r in roles]
+    index: dict[str, tuple[str, float]] = {}
+    for title in unique_titles:
+        title_vec = vectors.get(title)
+        if not title_vec:
+            continue
+        best_role, best_sim = None, 0.0
+        for role, role_vec in role_vectors:
+            if not role_vec:
+                continue
+            sim = cosine(title_vec, role_vec)
+            if sim > best_sim:
+                best_role, best_sim = role, sim
+        if best_role is not None and best_sim >= settings.ROLE_MATCH_THRESHOLD:
+            index[title] = (best_role, best_sim)
+    return index
+
+
+def score_role(lead: Lead, role_match_index: dict[str, tuple[str, float]] | None = None) -> tuple[float, str]:
+    # Phase 1: full score when the title IS one of the ICP's target roles.
+    if role_match_index and lead.title and lead.title.strip():
+        match = role_match_index.get(normalize_header(lead.title))
+        if match:
+            role, sim = match
+            return float(ROLE_MAX), (
+                f"Title '{lead.title}' matches ICP target role '{role}' "
+                f"(similarity {sim:.2f}) -> full {ROLE_MAX}/{ROLE_MAX}."
+            )
+    # Phase 2: fixed tier table + company-size modifier.
     tier_name, base = _match_role_tier(lead.title)
     if tier_name is None:
         return 0.0, "Title missing -> 0."
@@ -234,8 +288,8 @@ def tier_for(total: float) -> LeadTier:
     return LeadTier.DEPRIORITIZED
 
 
-def score_lead(lead: Lead, icp: ICP) -> None:
-    role, role_note = score_role(lead)
+def score_lead(lead: Lead, icp: ICP, role_match_index: dict[str, tuple[str, float]] | None = None) -> None:
+    role, role_note = score_role(lead, role_match_index)
     signal, signal_note = score_signal(lead)
     company_fit, fit_note = score_company_fit(lead)
     total = round(role + signal + company_fit, 1)
@@ -253,9 +307,11 @@ def score_lead(lead: Lead, icp: ICP) -> None:
 
 def score_import(db: Session, lead_import: LeadImport, icp: ICP) -> dict:
     repo = LeadRepository(db)
+    leads = repo.list_scorable_for_import(lead_import.id)
+    role_match_index = build_role_match_index(db, icp, [lead.title for lead in leads])
     counts = {t.value: 0 for t in LeadTier}
-    for lead in repo.list_scorable_for_import(lead_import.id):
-        score_lead(lead, icp)
+    for lead in leads:
+        score_lead(lead, icp, role_match_index)
         counts[lead.tier.value] += 1
     lead_import.status = ImportStatus.SCORED
     db.commit()
