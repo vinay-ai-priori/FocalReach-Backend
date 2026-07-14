@@ -15,6 +15,7 @@ celery_app = Celery(
         "app.tasks.qualification_tasks",
         "app.tasks.scoring_tasks",
         "app.tasks.email_tasks",
+        "app.tasks.dispatch_tasks",
     ],
 )
 
@@ -29,6 +30,12 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     task_soft_time_limit=300,
     task_time_limit=360,
+    # Outreach dispatch engine: 15s polling gives scheduled sends ~15s precision;
+    # the sweeper flags dispatches interrupted mid-send (see app/tasks/dispatch_tasks.py).
+    beat_schedule={
+        "outreach-dispatch-due": {"task": "outreach.dispatch_due", "schedule": 15.0},
+        "outreach-sweep-stuck": {"task": "outreach.sweep_stuck", "schedule": 60.0},
+    },
 )
 
 # Managed Redis over TLS (rediss:// — Upstash, Redis Cloud, Azure Cache) requires

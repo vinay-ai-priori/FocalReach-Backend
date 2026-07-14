@@ -21,6 +21,8 @@ class EmailDraftOut(BaseModel):
     last_test_email: str | None = None
     refine_count: int = 0
     sent_at: datetime | None = None
+    scheduled_at: datetime | None = None
+    attempt_count: int = 0
     created_at: datetime
 
 
@@ -31,6 +33,13 @@ class EmailDraftUpdate(BaseModel):
 
 class SendTestRequest(BaseModel):
     email: EmailStr
+
+
+class DispatchResolveRequest(BaseModel):
+    """Resolution for a NEEDS_ATTENTION draft: the user checked their Sent folder and
+    tells us whether the interrupted dispatch actually went out."""
+
+    resolution: str = Field(pattern="^(mark_sent|retry)$")
 
 
 class DraftBatchRequest(BaseModel):

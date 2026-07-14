@@ -18,6 +18,13 @@ class DraftStatus(str, enum.Enum):
     FAILED = "failed"
     SENT = "sent"
     APPROVED = "approved"
+    # Dispatch lifecycle (see scheduling_service): SCHEDULED holds a future slot;
+    # SENDING is the transient claim taken just before SMTP so a crash mid-send can
+    # never be silently re-dispatched; NEEDS_ATTENTION marks a dispatch interrupted
+    # mid-send (outcome unknown — user must verify their Sent folder and resolve).
+    SCHEDULED = "scheduled"
+    SENDING = "sending"
+    NEEDS_ATTENTION = "needs_attention"
 
 
 class EmailDraft(Base, PublicIDMixin, TimestampMixin):
@@ -56,4 +63,40 @@ class EmailDraft(Base, PublicIDMixin, TimestampMixin):
     # SENT. Displayed in place of the action buttons, which disappear once sent.
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # Dispatch scheduling (scheduling_service). scheduled_at is the claimed UTC slot;
+    # scheduled_by_user_id denormalizes the owner so the partial unique index
+    # ux_email_drafts_user_slot can enforce one-dispatch-per-slot at the DB level.
+    scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    scheduled_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    # Dispatch attempts so far (transient failures auto-retry up to a cap).
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # RFC 5322 Message-ID stamped BEFORE the SMTP send, so an interrupted dispatch
+    # can be verified against the mailbox's Sent folder.
+    message_id: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
     lead = relationship("Lead", back_populates="email_drafts")
+    dispatch_logs = relationship("DispatchLog", back_populates="draft", cascade="all, delete-orphan")
+
+
+class DispatchLog(Base, TimestampMixin):
+    """Audit trail: one row per dispatch attempt (scheduled or manual), successful or
+    not. Answers "why did this email go out at 9:04, not 9:00?" and makes every
+    incident reconstructable."""
+
+    __tablename__ = "dispatch_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    draft_id: Mapped[int] = mapped_column(
+        ForeignKey("email_drafts.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    attempt: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    scheduled_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # sent / retry_scheduled / failed / skipped_paused / skipped_no_mailbox /
+    # skipped_no_email / stuck / cancelled / manual_sent / manual_deferred ...
+    outcome: Mapped[str] = mapped_column(String(50), nullable=False)
+    detail: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    message_id: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    draft = relationship("EmailDraft", back_populates="dispatch_logs")

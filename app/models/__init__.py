@@ -9,7 +9,7 @@ from app.models.icp import ICP
 from app.models.lead_import import LeadImport
 from app.models.company import Company
 from app.models.lead import Lead
-from app.models.email_draft import EmailDraft
+from app.models.email_draft import DispatchLog, EmailDraft
 from app.models.crm_connection import CRMConnection
 from app.models.mailbox_connection import MailboxConnection, MailboxProvider
 from app.models.header_embedding import CanonicalFieldVector, HeaderEmbedding
@@ -29,6 +29,7 @@ __all__ = [
     "Company",
     "Lead",
     "EmailDraft",
+    "DispatchLog",
     "CRMConnection",
     "MailboxConnection",
     "MailboxProvider",

@@ -82,13 +82,24 @@ def send_email_via_smtp(
     to: str,
     subject: str,
     body: str,
+    message_id: str | None = None,
 ) -> None:
     """Sends a single plaintext email through the user's own mailbox (their app
-    password), so outreach comes from the rep's real address rather than a shared one."""
+    password), so outreach comes from the rep's real address rather than a shared one.
+
+    `message_id` (RFC 5322 Message-ID) lets callers stamp the id BEFORE dispatch so an
+    interrupted send can later be verified against the mailbox's Sent folder.
+
+    Raised ExternalServiceError carries `.transient`: True for network/temporary
+    failures (safe to auto-retry), False for auth/permanent rejections (retrying a bad
+    password just gets the mailbox locked).
+    """
     message = EmailMessage()
     message["From"] = email_address
     message["To"] = to
     message["Subject"] = subject
+    if message_id:
+        message["Message-ID"] = message_id
     message.set_content(body)
 
     try:
@@ -99,12 +110,22 @@ def send_email_via_smtp(
             conn.login(email_address, app_password)
             conn.send_message(message)
     except smtplib.SMTPAuthenticationError as exc:
-        raise ExternalServiceError(_friendly_auth_error(preset.display_name)) from exc
+        error = ExternalServiceError(_friendly_auth_error(preset.display_name))
+        error.transient = False
+        raise error from exc
+    except smtplib.SMTPRecipientsRefused as exc:
+        error = ExternalServiceError(f"The recipient address {to} was rejected by the mail server.")
+        error.transient = False
+        raise error from exc
     except (OSError, TimeoutError, smtplib.SMTPException) as exc:
         logger.warning("SMTP send via %s failed: %s", preset.smtp_host, exc)
-        raise ExternalServiceError(
+        error = ExternalServiceError(
             f"Could not reach {preset.smtp_host}:{preset.smtp_port} — check your network and try again."
-        ) from exc
+        )
+        error.transient = True
+        raise error from exc
     except Exception as exc:
         logger.exception("Unexpected SMTP send error for %s", email_address)
-        raise ExternalServiceError(f"Sending failed unexpectedly: {exc}") from exc
+        error = ExternalServiceError(f"Sending failed unexpectedly: {exc}")
+        error.transient = False
+        raise error from exc
