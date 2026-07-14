@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.api.auth_deps import get_current_user
 from app.api.deps import get_db
+from app.core.exceptions import ValidationFailedError
 from app.models.user import User
 from app.repositories.user_repository import UserRepository
 from app.schemas.auth import (
@@ -64,6 +65,10 @@ def setup_profile(
 def change_password(
     payload: ChangePasswordRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)
 ) -> TokenResponse:
+    """Requires the current password once, and the new password twice (must match) —
+    the current password is verified against the stored hash in auth_service."""
+    if payload.new_password != payload.confirm_new_password:
+        raise ValidationFailedError("New password and confirmation do not match.")
     tokens = auth_service.change_password(db, user, payload.current_password, payload.new_password)
     return TokenResponse(**tokens, user=_user_out(user))
 

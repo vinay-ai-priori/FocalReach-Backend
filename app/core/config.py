@@ -60,6 +60,13 @@ class Settings(BaseSettings):
     SUPERADMIN_PASSWORD: str = ""
     SUPERADMIN_NAME: str = "App Owner"
 
+    # Mailbox connections (IMAP/SMTP app passwords) — symmetric encryption key for
+    # credentials at rest. Generate with: python -c "from cryptography.fernet import
+    # Fernet; print(Fernet.generate_key().decode())". Required in production; a
+    # per-process fallback key is used in dev so the app still runs without one set
+    # (existing encrypted rows become unreadable if the key ever changes).
+    MAILBOX_CREDENTIALS_KEY: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:

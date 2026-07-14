@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 from app.models.email_draft import DraftStatus
 
@@ -18,12 +18,19 @@ class EmailDraftOut(BaseModel):
     booking_link: str | None = None
     ai_cached: bool = False
     error_message: str | None = None
+    last_test_email: str | None = None
+    refine_count: int = 0
+    sent_at: datetime | None = None
     created_at: datetime
 
 
 class EmailDraftUpdate(BaseModel):
     subject: str | None = None
     body: str | None = None
+
+
+class SendTestRequest(BaseModel):
+    email: EmailStr
 
 
 class DraftBatchRequest(BaseModel):

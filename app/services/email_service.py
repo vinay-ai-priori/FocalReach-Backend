@@ -39,6 +39,14 @@ logger = get_logger(__name__)
 REFINE_MODES = ("shorter", "more_technical", "more_executive", "more_friendly", "personalize_further")
 ALL_MODES = ("initial", "regenerate", *REFINE_MODES)
 
+# The first draft stays low-temperature (consistent, tightly grounded). Regenerate asks
+# for a genuinely different take on the same brief, so it needs real variety. The
+# reworded refine modes (more_technical/more_executive/more_friendly/personalize_further)
+# still need some freedom to actually change, but less than regenerate since they're
+# editing toward one specific dimension rather than rewriting freely. "shorter" is a trim,
+# not a rewrite, so it stays close to the first draft's low temperature.
+_TEMPERATURE_BY_MODE: dict[str, float] = {"initial": 0.2, "regenerate": 0.9, "shorter": 0.2}
+
 # Countries whose business English follows British conventions (spelling like
 # organise/optimise/colour, DD/MM dates, phrasing). Everything else defaults to US.
 _BRITISH_ENGLISH_COUNTRIES = {
@@ -85,19 +93,36 @@ GROUNDING RULES (mandatory):
 - If enrichment data is thin, stay general about their industry rather than fabricating specifics.
 - Match the requested TONE exactly.
 - Follow the ENGLISH VARIANT instruction exactly (spelling and phrasing).
-- If PREVIOUS DRAFTS are provided, write a fresh draft that does not repeat their exact sentences.
+- If PREVIOUS DRAFTS are provided, write a fresh draft that does not repeat their exact sentences —
+  UNLESS the REFINEMENT INSTRUCTION below says this is a trim/condense of the CURRENT DRAFT, in which
+  case keep the CURRENT DRAFT's exact wording and only remove/shorten what the instruction says to.
 
 Return ONLY a JSON object:
 {"subject": string, "body": string, "referenced_data": [string, string, ...]}
 - body: plain text with real line breaks, following the structure above.
 - referenced_data: 3-6 short bullet strings, each naming a specific fact you used and where it came from (e.g. "Lead company enrichment: Kentec manufactures life-safety detection systems", "ICP tone: consultative", "Location: United Kingdom -> British English"). Only list facts actually used."""
 
+_REWORD_REQUIREMENT = (
+    "The output MUST use noticeably different sentence wording and phrasing than the CURRENT DRAFT — "
+    "meeting the instruction below is not enough on its own if you just lightly edit the existing sentences; "
+    "rewrite them."
+)
+
 REFINE_INSTRUCTIONS: dict[str, str] = {
-    "shorter": "Rewrite the CURRENT DRAFT to be meaningfully shorter (roughly two-thirds the length) while keeping the mandatory structure, all grounding rules, the same core facts, and the same ask.",
-    "more_technical": "Rewrite the CURRENT DRAFT for a technical reader: use precise domain and technology terminology drawn from the provided data (never invented), and make the value explanation more concrete about how the solution works. Keep the mandatory structure and grounding rules.",
-    "more_executive": "Rewrite the CURRENT DRAFT for a senior executive reader: lead with business outcomes and strategic value, minimize operational detail, keep it crisp and confident. Keep the mandatory structure and grounding rules.",
-    "more_friendly": "Rewrite the CURRENT DRAFT in a warmer, more personable register while remaining professional. Keep the mandatory structure, all facts, and grounding rules.",
-    "personalize_further": "Rewrite the CURRENT DRAFT using MORE specific facts from the recipient company's enrichment data than the current draft does — pull in additional concrete details (offerings, technologies, pain points) that are present in the data but unused. Keep the mandatory structure and grounding rules.",
+    # A trim, not a rewrite: keep the CURRENT DRAFT's exact sentences and wording, and
+    # only cut redundant words/clauses or drop a less-essential sentence to hit roughly
+    # two-thirds the length. Do NOT rephrase sentences that are kept as-is.
+    "shorter": (
+        "Condense the CURRENT DRAFT to roughly two-thirds its length. This is a TRIM, not a rewrite: "
+        "reuse the CURRENT DRAFT's exact wording for every sentence you keep, and shorten only by "
+        "removing redundant words/clauses or cutting a less-essential sentence — do not rephrase "
+        "sentences that survive the cut. Keep the mandatory structure, all grounding rules, the same "
+        "core facts, and the same ask."
+    ),
+    "more_technical": f"Rewrite the CURRENT DRAFT for a technical reader: use precise domain and technology terminology drawn from the provided data (never invented), and make the value explanation more concrete about how the solution works. Keep the mandatory structure and grounding rules. {_REWORD_REQUIREMENT}",
+    "more_executive": f"Rewrite the CURRENT DRAFT for a senior executive reader: lead with business outcomes and strategic value, minimize operational detail, keep it crisp and confident. Keep the mandatory structure and grounding rules. {_REWORD_REQUIREMENT}",
+    "more_friendly": f"Rewrite the CURRENT DRAFT in a warmer, more personable register while remaining professional. Keep the mandatory structure, all facts, and grounding rules. {_REWORD_REQUIREMENT}",
+    "personalize_further": f"Rewrite the CURRENT DRAFT using MORE specific facts from the recipient company's enrichment data than the current draft does — pull in additional concrete details (offerings, technologies, pain points) that are present in the data but unused. Keep the mandatory structure and grounding rules. {_REWORD_REQUIREMENT}",
 }
 
 
@@ -206,7 +231,10 @@ def generate_email_draft(
     try:
         # Regenerate/refine must produce a NEW draft, so bypass the response cache for
         # everything except the very first generation.
-        data, was_cached = cached_json_completion(SYSTEM_PROMPT, user_prompt, skip_cache=mode != "initial")
+        temperature = _TEMPERATURE_BY_MODE.get(mode, 0.7)  # refine modes default to 0.7
+        data, was_cached = cached_json_completion(
+            SYSTEM_PROMPT, user_prompt, skip_cache=mode != "initial", temperature=temperature
+        )
         referenced = data.get("referenced_data") or []
         if isinstance(referenced, list):
             referenced = [str(r).strip() for r in referenced if str(r).strip()]

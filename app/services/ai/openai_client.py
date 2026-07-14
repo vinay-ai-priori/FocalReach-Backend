@@ -39,19 +39,24 @@ def _cache_key(system: str, user: str, model: str) -> str:
     retry=retry_if_exception_type(Exception),
     reraise=True,
 )
-def _call_openai(system: str, user: str, model: str, json_mode: bool) -> str:
+def _call_openai(system: str, user: str, model: str, json_mode: bool, temperature: float) -> str:
     response = _get_client().chat.completions.create(
         model=model,
         messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-        temperature=0.2,
+        temperature=temperature,
         response_format={"type": "json_object"} if json_mode else {"type": "text"},
     )
     return response.choices[0].message.content or ""
 
 
-def cached_completion(system: str, user: str, *, json_mode: bool = True, skip_cache: bool = False) -> tuple[str, bool]:
+def cached_completion(
+    system: str, user: str, *, json_mode: bool = True, skip_cache: bool = False, temperature: float = 0.2
+) -> tuple[str, bool]:
     """Returns (content, was_cached). `skip_cache` forces a fresh API call — used when
-    the caller explicitly wants a NEW result for an identical prompt (e.g. regenerate)."""
+    the caller explicitly wants a NEW result for an identical prompt (e.g. regenerate).
+    `temperature` should be raised for those same skip_cache calls: at the default 0.2
+    (near-greedy decoding), a near-identical prompt reconverges on near-identical
+    wording, which defeats the point of "regenerate"/"refine" giving something new."""
     model = settings.OPENAI_MODEL
     key = _cache_key(system, user, model)
 
@@ -64,7 +69,7 @@ def cached_completion(system: str, user: str, *, json_mode: bool = True, skip_ca
         except Exception as exc:
             logger.warning("Redis unavailable for AI cache read: %s", exc)
 
-    content = _call_openai(system, user, model, json_mode)
+    content = _call_openai(system, user, model, json_mode, temperature)
 
     try:
         get_redis().setex(key, settings.AI_CACHE_TTL_SECONDS, content)
@@ -73,8 +78,8 @@ def cached_completion(system: str, user: str, *, json_mode: bool = True, skip_ca
     return content, False
 
 
-def cached_json_completion(system: str, user: str, skip_cache: bool = False) -> tuple[dict, bool]:
-    content, was_cached = cached_completion(system, user, json_mode=True, skip_cache=skip_cache)
+def cached_json_completion(system: str, user: str, skip_cache: bool = False, temperature: float = 0.2) -> tuple[dict, bool]:
+    content, was_cached = cached_completion(system, user, json_mode=True, skip_cache=skip_cache, temperature=temperature)
     try:
         return json.loads(content), was_cached
     except json.JSONDecodeError as exc:

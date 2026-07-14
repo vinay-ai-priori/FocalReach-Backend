@@ -9,6 +9,7 @@ from app.api.v1 import (
     icps,
     imports,
     leads,
+    mailboxes,
     outreach,
     qualification,
     websites,
@@ -26,3 +27,4 @@ api_router.include_router(qualification.router)
 api_router.include_router(leads.router)
 api_router.include_router(outreach.router)
 api_router.include_router(crm.router)
+api_router.include_router(mailboxes.router)

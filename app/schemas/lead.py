@@ -22,6 +22,7 @@ class LeadOut(BaseModel):
     linkedin_url: str | None = None
     city: str | None = None
     country: str | None = None
+    timezone: str | None = None
     time_in_role: str | None = None
     time_at_company: str | None = None
     years_experience: str | None = None
@@ -33,6 +34,7 @@ class LeadOut(BaseModel):
     total_score: float | None = None
     tier: LeadTier | None = None
     score_breakdown: dict | None = None
+    outreach_paused: bool = False
 
 
 class PrioritizationSummary(BaseModel):
@@ -41,3 +43,9 @@ class PrioritizationSummary(BaseModel):
     warm: int
     nurture: int
     deprioritized: int
+
+
+class LeadTimezoneOut(BaseModel):
+    country: str
+    country_code: str | None = None
+    timezone: str | None = None

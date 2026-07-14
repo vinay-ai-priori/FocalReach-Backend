@@ -38,6 +38,9 @@ class Lead(Base, PublicIDMixin, TimestampMixin):
     city: Mapped[str | None] = mapped_column(String(255), nullable=True)
     state: Mapped[str | None] = mapped_column(String(255), nullable=True)
     country: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Cached result of lead_timezone_service, derived from `country` — populated the
+    # first time GET /leads/{id}/timezone is called so repeat lookups skip pycountry/pytz.
+    timezone: Mapped[str | None] = mapped_column(String(100), nullable=True)
     time_in_role: Mapped[str | None] = mapped_column(String(100), nullable=True)
     time_at_company: Mapped[str | None] = mapped_column(String(100), nullable=True)
     years_experience: Mapped[str | None] = mapped_column(String(100), nullable=True)
@@ -47,6 +50,11 @@ class Lead(Base, PublicIDMixin, TimestampMixin):
     # leads are excluded from scoring and outreach but kept for auditability.
     is_duplicate: Mapped[bool] = mapped_column(default=False, nullable=False)
     duplicate_reason: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    # Holds the whole outreach sequence for this lead (initial email + all future
+    # touches) without changing anything already drafted — reversible, unlike draft
+    # approval. Blocks Send/Send Test/Approve/refine while set.
+    outreach_paused: Mapped[bool] = mapped_column(default=False, nullable=False)
 
     # Scoring per the Role Score & Signal Score logic document:
     # role_score 0-30 (title tier + size modifier), signal_score 0-25 (tenure + experience),

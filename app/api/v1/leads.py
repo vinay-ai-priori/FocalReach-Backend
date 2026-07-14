@@ -5,12 +5,14 @@ from sqlalchemy.orm import Session
 
 from app.api.auth_deps import get_current_user
 from app.api.deps import get_db
-from app.api.ownership import get_owned_import
+from app.api.ownership import assert_import_owned, get_owned_import
+from app.core.exceptions import NotFoundError, ValidationFailedError
 from app.models.lead import LeadTier
 from app.models.user import User
 from app.models.lead import Lead
 from app.repositories.lead_repository import LeadRepository
-from app.schemas.lead import LeadOut, PrioritizationSummary
+from app.schemas.lead import LeadOut, LeadTimezoneOut, PrioritizationSummary
+from app.services.lead_timezone_service import TimezoneResult, resolve_timezone_for_country
 
 router = APIRouter(prefix="/leads", tags=["lead-prioritization"])
 
@@ -51,3 +53,50 @@ def summary(
         nurture=counts[LeadTier.NURTURE],
         deprioritized=counts[LeadTier.DEPRIORITIZED],
     )
+
+
+@router.get("/{lead_id}/timezone", response_model=LeadTimezoneOut)
+def get_lead_timezone(
+    lead_id: UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> LeadTimezoneOut:
+    """Derives the lead's IANA timezone from their country column (contact location),
+    used to schedule/send outreach at a sensible local time for the recipient."""
+    lead_repo = LeadRepository(db)
+    lead = lead_repo.get_by_public_id(lead_id)
+    if not lead:
+        raise NotFoundError(f"Lead {lead_id} not found.")
+    assert_import_owned(lead.lead_import, user)
+    if not lead.country:
+        raise ValidationFailedError("This lead has no country on file — timezone cannot be derived.")
+
+    if lead.timezone is None:
+        result = resolve_timezone_for_country(lead.country)
+        lead_repo.update(lead, timezone=result.timezone)
+    else:
+        result = TimezoneResult(country=lead.country, country_code=None, timezone=lead.timezone)
+
+    return LeadTimezoneOut(country=result.country, country_code=result.country_code, timezone=result.timezone)
+
+
+@router.post("/{lead_id}/pause", response_model=LeadOut)
+def pause_lead(lead_id: UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> LeadOut:
+    """Holds the whole outreach sequence for this lead — reversible via /resume, unlike
+    draft approval. Doesn't touch the draft's own content or status."""
+    lead_repo = LeadRepository(db)
+    lead = lead_repo.get_by_public_id(lead_id)
+    if not lead:
+        raise NotFoundError(f"Lead {lead_id} not found.")
+    assert_import_owned(lead.lead_import, user)
+    lead = lead_repo.update(lead, outreach_paused=True)
+    return _lead_out(lead)
+
+
+@router.post("/{lead_id}/resume", response_model=LeadOut)
+def resume_lead(lead_id: UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> LeadOut:
+    lead_repo = LeadRepository(db)
+    lead = lead_repo.get_by_public_id(lead_id)
+    if not lead:
+        raise NotFoundError(f"Lead {lead_id} not found.")
+    assert_import_owned(lead.lead_import, user)
+    lead = lead_repo.update(lead, outreach_paused=False)
+    return _lead_out(lead)

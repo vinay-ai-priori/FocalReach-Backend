@@ -11,6 +11,7 @@ from app.models.company import Company
 from app.models.lead import Lead
 from app.models.email_draft import EmailDraft
 from app.models.crm_connection import CRMConnection
+from app.models.mailbox_connection import MailboxConnection, MailboxProvider
 from app.models.header_embedding import CanonicalFieldVector, HeaderEmbedding
 
 __all__ = [
@@ -29,6 +30,8 @@ __all__ = [
     "Lead",
     "EmailDraft",
     "CRMConnection",
+    "MailboxConnection",
+    "MailboxProvider",
     "CanonicalFieldVector",
     "HeaderEmbedding",
 ]

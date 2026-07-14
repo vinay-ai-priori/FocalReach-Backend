@@ -22,3 +22,6 @@ pyjwt==2.10.1
 passlib==1.7.4
 argon2-cffi==23.1.0
 openpyxl>=3.1
+cryptography==43.0.1
+pycountry==24.6.1
+pytz==2024.2
