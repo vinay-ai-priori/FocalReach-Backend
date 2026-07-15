@@ -19,13 +19,20 @@ Fixed structure (every draft):
   [sender company]
 """
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.models.company import Company
 from app.models.company_intelligence import CompanyIntelligence
-from app.models.email_draft import DraftStatus, EmailDraft
+from app.models.email_draft import (
+    STEP_FOLLOW_UP_FIRST,
+    STEP_FOLLOW_UP_LAST,
+    DraftChannel,
+    DraftStatus,
+    EmailDraft,
+)
 from app.models.icp import ICP
 from app.models.lead import Lead
 from app.models.user import User
@@ -102,6 +109,68 @@ Return ONLY a JSON object:
 - body: plain text with real line breaks, following the structure above.
 - referenced_data: 3-6 short bullet strings, each naming a specific fact you used and where it came from (e.g. "Lead company enrichment: Kentec manufactures life-safety detection systems", "ICP tone: consultative", "Location: United Kingdom -> British English"). Only list facts actually used."""
 
+FOLLOW_UP_SYSTEM_PROMPT = """You write personalized B2B follow-up emails. An earlier outreach email (and possibly earlier follow-ups) went out to this recipient and received no reply. You MUST follow the exact structure and grounding rules below.
+
+STRUCTURE (mandatory, in this order):
+1. Greeting line: "Hello [recipient first name],"
+2. Opening line: a single short sentence that politely references the earlier email without guilt-tripping (e.g. acknowledging they are busy). Never say "just checking in" or "bumping this".
+3. Paragraph 1 — add NEW value: a fresh, specific angle grounded in the provided data (a different offering, pain point, or priority of the RECIPIENT's company than previous touches used, and a different aspect of the SENDER's solution). 2-3 sentences.
+4. Paragraph 2 — a professional closing ask: invite the recipient to share their available times for a short meeting. Do NOT include any booking links, URLs, or calendar links. 1 sentence.
+5. Sign-off exactly:
+Best regards,
+[sender name]
+[sender company]
+
+FOLLOW-UP RULES (mandatory):
+- Noticeably SHORTER than an initial email — 60-110 words of body text.
+- The subject line continues the thread naturally (it may be "Re: <initial subject>" when an initial subject is provided).
+- Do NOT repeat facts, angles, phrasing, or the value proposition already used in ANY previous touch listed — every previous touch counts as already said, whatever its channel.
+- Later follow-ups escalate gently: follow-up 3 may note it is the last email and leave the door open.
+
+GROUNDING RULES (mandatory):
+- Use ONLY facts present in the provided data. Never invent customers, metrics, case studies, or claims.
+- Match the requested TONE exactly. Follow the ENGLISH VARIANT instruction exactly.
+
+Return ONLY a JSON object:
+{"subject": string, "body": string, "referenced_data": [string, ...]}
+- body: plain text with real line breaks, following the structure above.
+- referenced_data: 3-6 short bullet strings naming the specific facts used and their source. Only list facts actually used."""
+
+LINKEDIN_SYSTEM_PROMPT = """You write short, personalized LinkedIn outreach messages for B2B prospecting. This message follows earlier email outreach that received no reply — LinkedIn is a lighter, more personal channel.
+
+RULES (mandatory):
+- Maximum 500 characters total. No subject line concept — put a natural one-line hook first.
+- Conversational and human, not salesy. No bullet points, no links, no booking/calendar links.
+- Ground every claim ONLY in the provided data; never invent facts.
+- Do NOT repeat the phrasing, facts, or angle of ANY previous touch listed — every previous touch counts as already said.
+- Reference something specific about the RECIPIENT's company, connect it to the SENDER's company in one clause, and end with a soft ask (open to a short chat / exchanging a couple of messages). Do not ask for a meeting time slot — that was the emails' ask.
+- Match the requested TONE and ENGLISH VARIANT exactly.
+
+Return ONLY a JSON object:
+{"subject": null, "body": string, "referenced_data": [string, ...]}
+- body: the LinkedIn message as plain text.
+- referenced_data: 2-5 short bullet strings naming the specific facts used and their source."""
+
+CALL_SYSTEM_PROMPT = """You write concise, practical cold-call scripts for B2B sales development. The caller has already emailed (and possibly messaged on LinkedIn) this prospect without a reply.
+
+STRUCTURE (mandatory, with these exact section headings):
+OPENER: 1-2 sentences — name, company, and permission-based opener ("Did I catch you at a bad time?" style), acknowledging the earlier email briefly.
+REASON FOR CALL: 2-3 sentences connecting a specific fact about the RECIPIENT's company to the SENDER's solution — use an angle NOT used in previous touches.
+DISCOVERY QUESTIONS: 3 short, open questions grounded in the recipient company's context.
+OBJECTION RESPONSES: the 2 most likely objections for this prospect, each with a 1-2 sentence response.
+CLOSE: 1-2 sentences asking for a short follow-up meeting.
+
+GROUNDING RULES (mandatory):
+- Use ONLY facts present in the provided data. Never invent customers, metrics, case studies, or claims.
+- Do NOT reuse the phrasing, facts, or angle of ANY previous touch listed — every previous touch counts as already said.
+- Spoken register: short sentences, contractions, no jargon dumps. Match the requested TONE and ENGLISH VARIANT.
+
+Return ONLY a JSON object:
+{"subject": null, "body": string, "referenced_data": [string, ...]}
+- body: the full script as plain text with the section headings above, real line breaks.
+- referenced_data: 3-6 short bullet strings naming the specific facts used and their source."""
+
+
 _REWORD_REQUIREMENT = (
     "The output MUST use noticeably different sentence wording and phrasing than the CURRENT DRAFT — "
     "meeting the instruction below is not enough on its own if you just lightly edit the existing sentences; "
@@ -144,6 +213,48 @@ def _enrich_company(company: Company) -> str:
     except Exception as exc:
         logger.warning("Enrichment crawl failed for %s: %s", company.website, exc)
         return ""
+
+
+STEP_LABELS = {
+    1: "Initial email",
+    2: "Follow-up 1",
+    3: "Follow-up 2",
+    4: "Follow-up 3",
+    5: "LinkedIn message",
+    6: "Call script",
+}
+
+
+def _system_prompt_for(draft: EmailDraft) -> str:
+    if draft.channel == DraftChannel.LINKEDIN:
+        return LINKEDIN_SYSTEM_PROMPT
+    if draft.channel == DraftChannel.CALL:
+        return CALL_SYSTEM_PROMPT
+    if STEP_FOLLOW_UP_FIRST <= draft.step_index <= STEP_FOLLOW_UP_LAST:
+        return FOLLOW_UP_SYSTEM_PROMPT
+    return SYSTEM_PROMPT
+
+
+def _prior_touches_block(db: Session, draft: EmailDraft) -> str:
+    """Every OTHER step already written for this lead, any channel, ordered by sequence
+    position. This is the 'already said — don't repeat it' context for follow-ups,
+    LinkedIn, and call scripts."""
+    others = db.scalars(
+        select(EmailDraft)
+        .where(EmailDraft.lead_id == draft.lead_id, EmailDraft.id != draft.id, EmailDraft.body.is_not(None))
+        .order_by(EmailDraft.step_index)
+    ).all()
+    if not others:
+        return "None."
+    lines = []
+    for other in others:
+        label = STEP_LABELS.get(other.step_index, f"Step {other.step_index}")
+        status = "sent" if other.status == DraftStatus.SENT else "drafted"
+        lines.append(f"--- {label} ({other.channel.value}, {status}) ---")
+        if other.subject:
+            lines.append(f"Subject: {other.subject}")
+        lines.append(other.body or "")
+    return "\n".join(lines)
 
 
 def _previous_drafts_block(draft: EmailDraft) -> str:
@@ -215,8 +326,12 @@ def generate_email_draft(
         "",
         f"RECIPIENT COMPANY WEBSITE CONTENT (for personalization):\n{enrichment[:8000] or 'Not available'}",
         "",
-        f"PREVIOUS DRAFTS IN THIS THREAD:\n{_previous_drafts_block(draft)}",
+        f"PREVIOUS OUTREACH TOUCHES TO THIS RECIPIENT (already said — do not repeat their facts, angles, or phrasing):\n{_prior_touches_block(db, draft)}",
+        "",
+        f"PREVIOUS DRAFTS OF THIS STEP:\n{_previous_drafts_block(draft)}",
     ]
+    if draft.channel == DraftChannel.EMAIL and STEP_FOLLOW_UP_FIRST <= draft.step_index <= STEP_FOLLOW_UP_LAST:
+        sections.insert(0, f"THIS IS {STEP_LABELS[draft.step_index].upper()} OF 3 IN THE SEQUENCE.")
     if is_refine:
         sections += [
             "",
@@ -233,7 +348,7 @@ def generate_email_draft(
         # everything except the very first generation.
         temperature = _TEMPERATURE_BY_MODE.get(mode, 0.7)  # refine modes default to 0.7
         data, was_cached = cached_json_completion(
-            SYSTEM_PROMPT, user_prompt, skip_cache=mode != "initial", temperature=temperature
+            _system_prompt_for(draft), user_prompt, skip_cache=mode != "initial", temperature=temperature
         )
         referenced = data.get("referenced_data") or []
         if isinstance(referenced, list):

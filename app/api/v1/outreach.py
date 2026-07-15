@@ -13,7 +13,19 @@ from app.api.ownership import assert_import_owned, get_owned_import
 from app.core.crypto import decrypt_secret
 from app.core.exceptions import AppException, ConflictError, NotFoundError, ValidationFailedError
 from app.models.user import User
-from app.models.email_draft import REFINE_LIMIT, DispatchLog, DraftStatus, EmailDraft
+from app.models.email_draft import (
+    REFINE_LIMIT,
+    STEP_CALL,
+    STEP_FOLLOW_UP_FIRST,
+    STEP_FOLLOW_UP_LAST,
+    STEP_INITIAL,
+    STEP_LINKEDIN,
+    DispatchLog,
+    DraftChannel,
+    DraftStatus,
+    EmailDraft,
+)
+from app.models.notification import Notification
 from app.models.lead import LeadTier
 from app.repositories.email_draft_repository import EmailDraftRepository
 from app.repositories.lead_repository import LeadRepository
@@ -26,6 +38,7 @@ from app.schemas.email import (
     EmailDraftOut,
     EmailDraftUpdate,
     SendTestRequest,
+    StepCreateRequest,
 )
 from app.services import scheduling_service as scheduling
 from app.services.mailbox.connection_service import send_email_via_smtp
@@ -122,6 +135,99 @@ def draft_batch(
     queued += _commit_batch()
 
     return TaskAccepted(task_id=None, status=f"queued {queued} drafts", resource_id=lead_import.public_id)
+
+
+_DISPATCHED = (DraftStatus.SENT, DraftStatus.SCHEDULED, DraftStatus.SENDING, DraftStatus.NEEDS_ATTENTION)
+_COMPLETED_STEP = (DraftStatus.SENT, DraftStatus.APPROVED)  # unlocks the next step
+
+
+def _owned_lead(db: Session, lead_id: UUID, user: User):
+    lead = LeadRepository(db).get_by_public_id(lead_id)
+    if not lead:
+        raise NotFoundError(f"Lead {lead_id} not found.")
+    assert_import_owned(lead.lead_import, user)
+    return lead
+
+
+@router.get("/leads/{lead_id}/steps", response_model=list[EmailDraftOut])
+def list_steps(lead_id: UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> list[EmailDraftOut]:
+    """The lead's full outreach sequence: initial email, follow-ups, LinkedIn, call."""
+    lead = _owned_lead(db, lead_id, user)
+    return [_draft_out(d) for d in EmailDraftRepository(db).list_for_lead(lead.id)]
+
+
+@router.post("/leads/{lead_id}/steps", response_model=EmailDraftOut)
+def create_step(
+    lead_id: UUID,
+    payload: StepCreateRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> EmailDraftOut:
+    """Generate the next outreach step on user click — nothing in the sequence beyond
+    the initial email is ever created automatically.
+
+    Gating: follow-ups (2-4) are strictly sequential and unlock once the previous email
+    step is sent or approved; LinkedIn and the call script unlock as soon as the initial
+    email is sent/approved, independent of follow-up progress. A FAILED draft in the
+    target slot is retried in place rather than duplicated."""
+    lead = _owned_lead(db, lead_id, user)
+    if lead.outreach_paused:
+        raise ValidationFailedError("Outreach is paused for this lead — resume it first.")
+    if payload.channel == DraftChannel.EMAIL and not lead.email:
+        raise ValidationFailedError("This lead has no email address on file.")
+    repo = EmailDraftRepository(db)
+
+    # Everything after step 1 is gated on the initial email being out the door.
+    initial = repo.get_step(lead.id, DraftChannel.EMAIL, STEP_INITIAL)
+    if not initial or initial.status not in _COMPLETED_STEP:
+        raise ValidationFailedError("Send the initial email first — later touches build on it.")
+
+    if payload.channel == DraftChannel.EMAIL:
+        # Next free follow-up slot, gated on the previous email step being sent/approved.
+        target = None
+        for idx in range(STEP_FOLLOW_UP_FIRST, STEP_FOLLOW_UP_LAST + 1):
+            existing = repo.get_step(lead.id, DraftChannel.EMAIL, idx)
+            if existing and existing.status != DraftStatus.FAILED:
+                continue
+            previous = initial if idx == STEP_FOLLOW_UP_FIRST else repo.get_step(lead.id, DraftChannel.EMAIL, idx - 1)
+            if not previous or previous.status not in _COMPLETED_STEP:
+                raise ValidationFailedError(
+                    "The previous email in the sequence must be sent (or approved) before drafting the next follow-up."
+                )
+            target = (idx, existing)
+            break
+        if target is None:
+            raise ValidationFailedError("All three follow-ups have already been drafted for this lead.")
+        step_index, failed = target
+    else:
+        step_index = STEP_LINKEDIN if payload.channel == DraftChannel.LINKEDIN else STEP_CALL
+        failed = repo.get_step(lead.id, payload.channel, step_index)
+        if failed and failed.status != DraftStatus.FAILED:
+            raise ValidationFailedError("This step has already been generated for this lead.")
+
+    if failed:  # retry the failed generation in place
+        failed.status = DraftStatus.PENDING
+        failed.error_message = None
+        draft = failed
+    else:
+        draft = EmailDraft(lead_id=lead.id, channel=payload.channel, step_index=step_index, status=DraftStatus.PENDING)
+        db.add(draft)
+    try:
+        db.flush()
+        draft_id = draft.id
+        db.commit()
+    except IntegrityError:
+        # ux_email_drafts_step_active: a concurrent request beat us to this slot.
+        db.rollback()
+        raise ConflictError("This step is already being generated — refresh to see it.")
+    draft_email_task.delay(draft_id)
+
+    # Drafting the step resolves any pending follow-up-due nudge for this lead.
+    db.query(Notification).filter(
+        Notification.lead_id == lead.id, Notification.read_at.is_(None)
+    ).update({"read_at": datetime.now(timezone.utc)})
+    db.commit()
+    return _draft_out(repo.get(draft_id))
 
 
 @router.get("/imports/{import_id}/drafts", response_model=list[EmailDraftOut])
@@ -232,6 +338,8 @@ def _get_dispatchable_draft(db: Session, draft_id: UUID, user: User) -> EmailDra
     assert_import_owned(draft.lead.lead_import, user)
     _assert_not_paused(draft)
 
+    if draft.channel != DraftChannel.EMAIL:
+        raise ValidationFailedError("LinkedIn messages and call scripts are drafts only — they are never dispatched.")
     if draft.status == DraftStatus.SCHEDULED:
         raise ConflictError("This email is already scheduled — cancel the schedule first to change it.")
     if draft.status in (DraftStatus.SENDING, DraftStatus.SENT):
@@ -447,6 +555,8 @@ def send_test(
     assert_import_owned(draft.lead.lead_import, user)
     _assert_not_paused(draft)
 
+    if draft.channel != DraftChannel.EMAIL:
+        raise ValidationFailedError("LinkedIn messages and call scripts are drafts only — they are never dispatched.")
     if draft.status not in (DraftStatus.READY, DraftStatus.APPROVED):
         raise ValidationFailedError("Only a ready (or approved) draft can be sent.")
 

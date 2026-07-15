@@ -3,7 +3,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
-from app.models.email_draft import DraftStatus
+from app.models.email_draft import DraftChannel, DraftStatus
 
 
 class EmailDraftOut(BaseModel):
@@ -11,6 +11,8 @@ class EmailDraftOut(BaseModel):
 
     public_id: UUID
     lead_public_id: UUID | None = None
+    channel: DraftChannel = DraftChannel.EMAIL
+    step_index: int = 1
     status: DraftStatus
     subject: str | None = None
     body: str | None = None
@@ -44,6 +46,27 @@ class DispatchResolveRequest(BaseModel):
 
 class DraftBatchRequest(BaseModel):
     lead_ids: list[UUID] | None = None  # None = all eligible leads in the import
+
+
+class StepCreateRequest(BaseModel):
+    """Generate the next outreach step for a lead. For channel=email the next follow-up
+    slot (2-4) is computed server-side; linkedin/call occupy their fixed positions."""
+
+    channel: DraftChannel
+
+
+class NotificationOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    public_id: UUID
+    kind: str
+    due_step_index: int
+    lead_public_id: UUID | None = None
+    lead_name: str | None = None
+    company_name: str | None = None
+    campaign_public_id: UUID | None = None
+    read_at: datetime | None = None
+    created_at: datetime
 
 
 class DraftRefineRequest(BaseModel):

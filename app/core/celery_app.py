@@ -16,6 +16,7 @@ celery_app = Celery(
         "app.tasks.scoring_tasks",
         "app.tasks.email_tasks",
         "app.tasks.dispatch_tasks",
+        "app.tasks.notification_tasks",
     ],
 )
 
@@ -35,6 +36,8 @@ celery_app.conf.update(
     beat_schedule={
         "outreach-dispatch-due": {"task": "outreach.dispatch_due", "schedule": 15.0},
         "outreach-sweep-stuck": {"task": "outreach.sweep_stuck", "schedule": 60.0},
+        # Follow-up-due nudges (header bell). Hourly is plenty for day-granularity cadence.
+        "outreach-follow-up-due": {"task": "outreach.raise_follow_up_due", "schedule": 3600.0},
     },
 )
 
