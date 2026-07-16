@@ -39,6 +39,10 @@ class WebsiteUnreachableError(AppException):
 class ExternalServiceError(AppException):
     status_code = status.HTTP_502_BAD_GATEWAY
     code = "external_service_error"
+    # HTTP status the external service itself returned, when a response was received
+    # at all (None for timeouts/connection failures). Lets callers distinguish
+    # "the service rejected this request" (4xx) from "the service is down" (5xx/None).
+    upstream_status: int | None = None
 
 
 class ConflictError(AppException):

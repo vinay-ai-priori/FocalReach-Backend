@@ -46,8 +46,36 @@ class Settings(BaseSettings):
     CRAWLER_MAX_PAGES: int = 5
     MIN_CONTENT_LENGTH_FOR_PLAYWRIGHT_FALLBACK: int = 400
 
-    # Calendar
-    CALCOM_BOOKING_URL: str = "https://cal.com/your-team/discovery-call"
+    # Cal.com OAuth (per-user "Connect Calendar") — register an OAuth client in Cal.com
+    # to get these. Redirect URI must be registered EXACTLY on the Cal.com side (path
+    # included) and must point at the FRONTEND route (Cal.com Platform OAuth clients
+    # only redirect to app URLs, not arbitrary backend endpoints) — the frontend then
+    # calls POST /api/v1/calcom/exchange with the returned code to finish the flow.
+    CALCOM_CLIENT_ID: str = ""
+    CALCOM_CLIENT_SECRET: str = ""
+    CALCOM_REDIRECT_URI: str = "http://localhost:5173/connect-calendar"
+    CALCOM_OAUTH_AUTHORIZE_URL: str = "https://app.cal.com/auth/oauth2/authorize"
+    CALCOM_OAUTH_TOKEN_URL: str = "https://api.cal.com/v2/auth/oauth2/token"
+    CALCOM_API_BASE_URL: str = "https://api.cal.com/v2"
+    # Cal.com scope names are RESOURCE_ACTION (per cal.com/docs/api-reference/v2/oauth),
+    # e.g. "EVENT_TYPE_READ" not "READ_EVENT_TYPE" — and "Availability" in the dashboard
+    # UI maps to the SCHEDULE_* scope, not AVAILABILITY_*. Must be a subset of what's
+    # granted to the OAuth client (Platform dashboard -> OAuth Client -> permissions) or
+    # the whole authorize request is rejected before Cal.com even shows a login screen.
+    CALCOM_OAUTH_SCOPES: str = (
+        "EVENT_TYPE_READ EVENT_TYPE_WRITE BOOKING_READ BOOKING_WRITE "
+        "SCHEDULE_READ SCHEDULE_WRITE PROFILE_READ PROFILE_WRITE"
+    )
+    # How long before actual expiry we treat a Cal.com access token as due for refresh —
+    # wide enough that a request never race-loses against the token dying mid-call.
+    CALCOM_TOKEN_REFRESH_BUFFER_SECONDS: int = 300
+
+    # Inbox reply poller (app/tasks/inbox_poll_tasks.py, every 10 min).
+    INBOX_POLL_BATCH_SIZE: int = 50  # max new messages fetched per mailbox per poll
+    # Below this, the intent classifier's own verdict is not trusted and the reply is
+    # treated as neutral (paused + notified, no automated action) instead.
+    REPLY_INTENT_CONFIDENCE_THRESHOLD: float = 0.6
+    REPLY_DATETIME_CONFIDENCE_THRESHOLD: float = 0.6
 
     # Auth
     JWT_SECRET: str = "change-me-in-production"

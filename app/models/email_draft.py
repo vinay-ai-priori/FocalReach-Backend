@@ -24,6 +24,11 @@ STEP_FOLLOW_UP_FIRST = 2  # follow-ups occupy 2, 3, 4
 STEP_FOLLOW_UP_LAST = 4
 STEP_LINKEDIN = 5
 STEP_CALL = 6
+# Auto-sent "share your availability" reply to a POSITIVE-classified inbound reply
+# (see app/services/inbox/reply_router.py). Deliberately outside 1-6 so it's excluded
+# from the fixed-cadence follow-up-due scan (STEP_FOLLOW_UP_LAST) and from occupying
+# a normal sequence slot — a lead can get any number of these across a conversation.
+STEP_SCHEDULING_REPLY = 100
 
 # Days after the previous email's dispatch at which the follow-up-due notification
 # fires, keyed by the follow-up's step_index: FU1 3d after initial, FU2 4d after FU1,

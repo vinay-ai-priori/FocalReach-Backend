@@ -13,6 +13,9 @@ from app.models.email_draft import DispatchLog, DraftChannel, EmailDraft
 from app.models.notification import Notification
 from app.models.crm_connection import CRMConnection
 from app.models.mailbox_connection import MailboxConnection, MailboxProvider
+from app.models.calcom_connection import CalComConnection
+from app.models.inbound_reply import InboundReply, ReplyIntent
+from app.models.pending_booking import PendingBooking, PendingBookingStatus, TimezoneSource
 from app.models.header_embedding import CanonicalFieldVector, HeaderEmbedding
 
 __all__ = [
@@ -36,6 +39,12 @@ __all__ = [
     "CRMConnection",
     "MailboxConnection",
     "MailboxProvider",
+    "CalComConnection",
+    "InboundReply",
+    "ReplyIntent",
+    "PendingBooking",
+    "PendingBookingStatus",
+    "TimezoneSource",
     "CanonicalFieldVector",
     "HeaderEmbedding",
 ]

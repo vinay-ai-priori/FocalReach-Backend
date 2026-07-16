@@ -17,6 +17,8 @@ celery_app = Celery(
         "app.tasks.email_tasks",
         "app.tasks.dispatch_tasks",
         "app.tasks.notification_tasks",
+        "app.tasks.calcom_tasks",
+        "app.tasks.inbox_poll_tasks",
     ],
 )
 
@@ -31,13 +33,21 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     task_soft_time_limit=300,
     task_time_limit=360,
-    # Outreach dispatch engine: 15s polling gives scheduled sends ~15s precision;
-    # the sweeper flags dispatches interrupted mid-send (see app/tasks/dispatch_tasks.py).
+    # Outreach dispatch engine: 60s polling gives scheduled sends ~60s precision, well
+    # under the 2-minute SCHEDULE_GAP slots dispatches are already spaced at (see
+    # app/services/scheduling_service.py); the sweeper flags dispatches interrupted
+    # mid-send (see app/tasks/dispatch_tasks.py).
     beat_schedule={
-        "outreach-dispatch-due": {"task": "outreach.dispatch_due", "schedule": 15.0},
+        "outreach-dispatch-due": {"task": "outreach.dispatch_due", "schedule": 60.0},
         "outreach-sweep-stuck": {"task": "outreach.sweep_stuck", "schedule": 60.0},
         # Follow-up-due nudges (header bell). Hourly is plenty for day-granularity cadence.
         "outreach-follow-up-due": {"task": "outreach.raise_follow_up_due", "schedule": 3600.0},
+        # Proactively refresh Cal.com tokens before they'd ever be seen expired by a
+        # request; the lazy refresh in the request path is the real safety net.
+        "calcom-refresh-expiring-tokens": {"task": "calcom.refresh_expiring_tokens", "schedule": 600.0},
+        # Inbox reply poller — reads new mail, classifies intent, routes it
+        # (app/services/inbox/). 10 minutes per your requirement.
+        "inbox-poll-replies": {"task": "inbox.poll_replies", "schedule": 600.0},
     },
 )
 

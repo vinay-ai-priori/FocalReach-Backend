@@ -137,6 +137,24 @@ def _dispatch_one(db, draft: EmailDraft) -> bool:
         draft.message_id = make_msgid(domain=mailbox.email_address.split("@")[-1])
         db.commit()
 
+    # Thread this send into the lead's ongoing conversation: In-Reply-To is the most
+    # recent prior sent message, References is the full chain — this is both what
+    # makes the prospect's mail client group everything as one thread, and what the
+    # reply poller matches inbound replies back against.
+    prior_message_ids = [
+        mid
+        for (mid,) in db.execute(
+            select(EmailDraft.message_id)
+            .where(
+                EmailDraft.lead_id == draft.lead_id,
+                EmailDraft.status == DraftStatus.SENT,
+                EmailDraft.message_id.is_not(None),
+                EmailDraft.id != draft.id,
+            )
+            .order_by(EmailDraft.sent_at)
+        )
+    ]
+
     preset = get_preset(mailbox.provider)
     try:
         app_password = decrypt_secret(mailbox.encrypted_app_password)
@@ -148,6 +166,8 @@ def _dispatch_one(db, draft: EmailDraft) -> bool:
             subject=draft.subject,
             body=draft.body,
             message_id=draft.message_id,
+            in_reply_to=prior_message_ids[-1] if prior_message_ids else None,
+            references=" ".join(prior_message_ids) if prior_message_ids else None,
         )
     except AppException as exc:
         return _handle_send_failure(db, draft, user_id, str(exc.message), getattr(exc, "transient", False))

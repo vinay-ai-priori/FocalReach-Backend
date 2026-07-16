@@ -83,12 +83,18 @@ def send_email_via_smtp(
     subject: str,
     body: str,
     message_id: str | None = None,
+    in_reply_to: str | None = None,
+    references: str | None = None,
 ) -> None:
     """Sends a single plaintext email through the user's own mailbox (their app
     password), so outreach comes from the rep's real address rather than a shared one.
 
     `message_id` (RFC 5322 Message-ID) lets callers stamp the id BEFORE dispatch so an
     interrupted send can later be verified against the mailbox's Sent folder.
+
+    `in_reply_to`/`references` thread every email in a lead's sequence into one
+    conversation in the prospect's mail client (and are what the reply poller matches
+    inbound replies back against — see app/services/inbox/imap_poll_service.py).
 
     Raised ExternalServiceError carries `.transient`: True for network/temporary
     failures (safe to auto-retry), False for auth/permanent rejections (retrying a bad
@@ -100,6 +106,10 @@ def send_email_via_smtp(
     message["Subject"] = subject
     if message_id:
         message["Message-ID"] = message_id
+    if in_reply_to:
+        message["In-Reply-To"] = in_reply_to
+    if references:
+        message["References"] = references
     message.set_content(body)
 
     try:

@@ -60,7 +60,8 @@ class NotificationOut(BaseModel):
 
     public_id: UUID
     kind: str
-    due_step_index: int
+    due_step_index: int | None = None
+    detail: str | None = None
     lead_public_id: UUID | None = None
     lead_name: str | None = None
     company_name: str | None = None
