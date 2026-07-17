@@ -49,6 +49,9 @@ class Company(Base, PublicIDMixin, TimestampMixin):
     industry_match_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     company_fit_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     qualification_reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Prospect pain points the sender's offering can solve, extracted during the same
+    # qualification LLM call: [{pain_point, evidence, solved_by}]
+    solvable_pain_points: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
     # Cached crawl of the target company site, used for email personalisation
     enrichment_content: Mapped[str | None] = mapped_column(Text, nullable=True)

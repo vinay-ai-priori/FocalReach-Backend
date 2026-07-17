@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     # role pass ("VP of Ops" ~ "Vice President Operations"); adjacent roles don't.
     ROLE_MATCH_THRESHOLD: float = 0.80
     AI_CACHE_TTL_SECONDS: int = 7 * 24 * 3600
+    # Freshness window for the cross-campaign enrichment cache (global_companies).
+    # Rows older than this are re-scraped and refreshed in place.
+    ENRICHMENT_TTL_DAYS: int = 10
 
     # Website intelligence
     WEBSITE_CACHE_TTL_SECONDS: int = 7 * 24 * 3600

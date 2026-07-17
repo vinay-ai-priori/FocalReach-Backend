@@ -8,6 +8,7 @@ from app.models.company_intelligence import CompanyIntelligence
 from app.models.icp import ICP
 from app.models.lead_import import LeadImport
 from app.models.company import Company
+from app.models.global_company import GlobalCompany
 from app.models.lead import Lead
 from app.models.email_draft import DispatchLog, DraftChannel, EmailDraft
 from app.models.notification import Notification
@@ -31,6 +32,7 @@ __all__ = [
     "ICP",
     "LeadImport",
     "Company",
+    "GlobalCompany",
     "Lead",
     "EmailDraft",
     "DispatchLog",

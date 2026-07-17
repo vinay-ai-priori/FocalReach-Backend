@@ -62,6 +62,11 @@ class CalComClient:
         self._auth = (settings.CALCOM_CLIENT_ID, settings.CALCOM_CLIENT_SECRET)
 
     def build_authorize_url(self, *, state: str) -> str:
+        # Only the params Cal.com's OAuth docs actually accept (client_id,
+        # redirect_uri, scope, state) plus the spec-standard response_type. No
+        # `prompt`: Cal.com doesn't document it and demonstrably ignores account
+        # switching — connecting a different account requires signing out at
+        # app.cal.com first (surfaced in the connect UI).
         params = httpx.QueryParams(
             {
                 "client_id": settings.CALCOM_CLIENT_ID,
@@ -69,10 +74,6 @@ class CalComClient:
                 "response_type": "code",
                 "scope": settings.CALCOM_OAUTH_SCOPES,
                 "state": state,
-                # Best-effort nudge for an account chooser instead of silently reusing
-                # whatever Cal.com session cookie is already in the browser. Standard
-                # OIDC providers honor this; if Cal.com ignores it, it's a harmless no-op.
-                "prompt": "login select_account",
             }
         )
         return f"{settings.CALCOM_OAUTH_AUTHORIZE_URL}?{params}"
@@ -136,16 +137,15 @@ class CalComClient:
         )
         return resp.json().get("data", resp.json())
 
-    def list_event_types(self, access_token: str) -> list[dict[str, Any]]:
+    def get_event_type(self, access_token: str, event_type_id: int) -> dict[str, Any]:
         resp = _request(
             "GET",
-            f"{settings.CALCOM_API_BASE_URL}/event-types",
-            error_prefix="Could not fetch Cal.com event types",
+            f"{settings.CALCOM_API_BASE_URL}/event-types/{event_type_id}",
+            error_prefix="Could not fetch the Cal.com event type",
             headers=self._headers(access_token, self._VERSION_EVENT_TYPES),
             timeout=15,
         )
-        data = resp.json().get("data", [])
-        return data if isinstance(data, list) else data.get("eventTypes", [])
+        return resp.json().get("data", resp.json())
 
     def create_event_type(self, access_token: str, *, body: dict[str, Any]) -> dict[str, Any]:
         """`body` is the exact Cal.com request body (see schemas.calcom.
@@ -155,6 +155,20 @@ class CalComClient:
             "POST",
             f"{settings.CALCOM_API_BASE_URL}/event-types",
             error_prefix="Could not create Cal.com event type",
+            headers=self._headers(access_token, self._VERSION_EVENT_TYPES),
+            json=body,
+            timeout=15,
+        )
+        return resp.json().get("data", resp.json())
+
+    def update_event_type(self, access_token: str, event_type_id: int, *, body: dict[str, Any]) -> dict[str, Any]:
+        """`body` is the exact Cal.com PATCH request body (see schemas.calcom.
+        UpdateEventTypeRequest) — forwarded as-is. Slug is deliberately never part of
+        this body (see UpdateEventTypeRequest) so the booking link never changes."""
+        resp = _request(
+            "PATCH",
+            f"{settings.CALCOM_API_BASE_URL}/event-types/{event_type_id}",
+            error_prefix="Could not update Cal.com event type",
             headers=self._headers(access_token, self._VERSION_EVENT_TYPES),
             json=body,
             timeout=15,

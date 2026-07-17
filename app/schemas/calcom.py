@@ -46,20 +46,16 @@ class CalComStatusOut(BaseModel):
     connection: CalComConnectionOut | None = None
 
 
-class CalComEventTypeOut(BaseModel):
-    id: int
+class CalComEventTypeDetailOut(BaseModel):
+    """The current live values of the user's one event type — fetched fresh from
+    Cal.com so the edit form never silently resets a field the UI didn't ask about
+    (we don't persist length/description/notice locally, only title/slug/id)."""
+
     title: str
     slug: str
     length_minutes: int
     description: str | None = None
-    hidden: bool | None = None
-    schedule_id: int | None = None
-
-
-class SelectEventTypeRequest(BaseModel):
-    event_type_id: int
-    slug: str
-    title: str
+    minimum_booking_notice: int | None = None
 
 
 class CreateEventTypeRequest(BaseModel):
@@ -70,7 +66,10 @@ class CreateEventTypeRequest(BaseModel):
     etc.) are typed as loose dicts/lists since Cal.com's own union schemas for them are
     validated server-side; malformed shapes come back as a clear Cal.com 400, not a
     silent drop. `exclude_none` on dump means unset fields are simply omitted, letting
-    Cal.com apply its own defaults."""
+    Cal.com apply its own defaults.
+
+    A user may only ever create ONE event type (see POST /calcom/event-type) — this is
+    the create-time body. To change it afterward, see UpdateEventTypeRequest below."""
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -140,6 +139,29 @@ class CreateEventTypeRequest(BaseModel):
     private_note_enabled: bool | None = Field(default=None, alias="privateNoteEnabled")
     private_note_mode: str | None = Field(default=None, alias="privateNoteMode")
     private_note_template: str | None = Field(default=None, alias="privateNoteTemplate")
+
+
+class UpdateEventTypeRequest(BaseModel):
+    """Editable subset of Cal.com's event-type fields for the user's one-and-only
+    event type (see CreateEventTypeRequest for the full create-time superset). `slug`
+    is deliberately NOT editable here — changing it would silently break the booking
+    link already shown on the Discovery Calls page and sent to leads."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    length_in_minutes: int | None = Field(default=None, gt=0, le=1440, alias="lengthInMinutes")
+    description: str | None = Field(default=None, max_length=2000)
+    minimum_booking_notice: int | None = Field(default=None, ge=0, alias="minimumBookingNotice")
+
+    @model_validator(mode="after")
+    def _at_least_one_field(self) -> "UpdateEventTypeRequest":
+        if all(
+            v is None
+            for v in (self.title, self.length_in_minutes, self.description, self.minimum_booking_notice)
+        ):
+            raise ValueError("Provide at least one field to update.")
+        return self
 
 
 class SetTimezoneRequest(BaseModel):

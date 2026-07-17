@@ -17,6 +17,9 @@ class ProviderPreset:
     smtp_port: int
     app_password_url: str
     instructions: list[str]
+    # IMAP folder names where this provider files copies of sent mail, most likely
+    # first — used by sent_verification.py to auto-resolve interrupted dispatches.
+    sent_folders: tuple[str, ...] = ("Sent",)
 
 
 PROVIDER_PRESETS: dict[MailboxProvider, ProviderPreset] = {
@@ -35,6 +38,7 @@ PROVIDER_PRESETS: dict[MailboxProvider, ProviderPreset] = {
             "Google shows a 16-character app password — copy it. This is NOT your normal Google password.",
             "Come back here and paste it in, along with the Gmail/Workspace address it belongs to.",
         ],
+        sent_folders=("[Gmail]/Sent Mail", "Sent"),
     ),
     MailboxProvider.MICROSOFT: ProviderPreset(
         provider=MailboxProvider.MICROSOFT,
@@ -51,6 +55,7 @@ PROVIDER_PRESETS: dict[MailboxProvider, ProviderPreset] = {
             "If your account is managed by a work/school organization and you don't see this option, ask your admin to enable app passwords (or use \"modern auth\" mailbox support, coming later).",
             "Come back here and paste the app password in, along with your Outlook/Microsoft 365 address.",
         ],
+        sent_folders=("Sent Items", "Sent"),
     ),
 }
 

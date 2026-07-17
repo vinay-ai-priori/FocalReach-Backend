@@ -18,6 +18,7 @@ celery_app = Celery(
         "app.tasks.dispatch_tasks",
         "app.tasks.notification_tasks",
         "app.tasks.calcom_tasks",
+        "app.tasks.booking_tasks",
         "app.tasks.inbox_poll_tasks",
     ],
 )
@@ -39,7 +40,9 @@ celery_app.conf.update(
     # mid-send (see app/tasks/dispatch_tasks.py).
     beat_schedule={
         "outreach-dispatch-due": {"task": "outreach.dispatch_due", "schedule": 60.0},
-        "outreach-sweep-stuck": {"task": "outreach.sweep_stuck", "schedule": 60.0},
+        # Interrupted-dispatch resolver: drafts stuck in SENDING for >10 min get
+        # auto-verified against the Sent folder (see dispatch_tasks.sweep_stuck).
+        "outreach-sweep-stuck": {"task": "outreach.sweep_stuck", "schedule": 1800.0},
         # Follow-up-due nudges (header bell). Hourly is plenty for day-granularity cadence.
         "outreach-follow-up-due": {"task": "outreach.raise_follow_up_due", "schedule": 3600.0},
         # Proactively refresh Cal.com tokens before they'd ever be seen expired by a
@@ -48,6 +51,9 @@ celery_app.conf.update(
         # Inbox reply poller — reads new mail, classifies intent, routes it
         # (app/services/inbox/). 10 minutes per your requirement.
         "inbox-poll-replies": {"task": "inbox.poll_replies", "schedule": 600.0},
+        # Booking orchestrator safety net: re-processes PENDING bookings whose direct
+        # enqueue was lost, and flags bookings stuck mid-claim for manual review.
+        "booking-sweep-stale": {"task": "booking.sweep_stale", "schedule": 300.0},
     },
 )
 

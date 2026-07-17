@@ -4,9 +4,9 @@
   FOR UPDATE SKIP LOCKED (multi-worker safe), flips each to SENDING and COMMITS
   BEFORE touching SMTP — so a crash mid-send leaves an explicit SENDING row instead
   of silently double-dispatching. Guarantee: at-most-once delivery.
-- `outreach.sweep_stuck` (every 60s): rows stuck in SENDING for > 5 minutes become
-  NEEDS_ATTENTION for manual resolution (verify Sent folder via the stamped
-  Message-ID, then retry or mark sent).
+- `outreach.sweep_stuck` (every 30 min): rows stuck in SENDING for > 10 minutes are
+  auto-resolved by searching the Sent folder for the stamped Message-ID (found ->
+  SENT, proven absent -> auto-retry, unverifiable -> NEEDS_ATTENTION for a human).
 - Heartbeat in Redis so a dead beat/worker is detectable in minutes.
 """
 
@@ -15,6 +15,7 @@ from email.utils import make_msgid
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.core.celery_app import celery_app
 from app.core.crypto import decrypt_secret
@@ -22,9 +23,11 @@ from app.core.exceptions import AppException
 from app.core.logging import configure_logging, get_logger
 from app.db.session import SessionLocal
 from app.models.email_draft import DispatchLog, DraftStatus, EmailDraft
+from app.models.notification import Notification
 from app.repositories.mailbox_repository import MailboxConnectionRepository
 from app.services.mailbox.connection_service import send_email_via_smtp
 from app.services.mailbox.providers import get_preset
+from app.services.mailbox.sent_verification import SentVerification, verify_message_in_sent_folder
 from app.services.scheduling_service import (
     SCHEDULE_GAP,
     acquire_user_schedule_lock,
@@ -36,7 +39,7 @@ configure_logging()
 logger = get_logger(__name__)
 
 MAX_DISPATCH_ATTEMPTS = 3
-STUCK_SENDING_AFTER = timedelta(minutes=5)
+STUCK_SENDING_AFTER = timedelta(minutes=10)
 CLAIM_BATCH_SIZE = 20
 HEARTBEAT_KEY = "outreach:dispatcher:heartbeat"
 
@@ -208,27 +211,108 @@ def _handle_send_failure(db, draft: EmailDraft, user_id: int | None, reason: str
 
 @celery_app.task(name="outreach.sweep_stuck")
 def sweep_stuck_dispatches() -> dict:
-    """SENDING rows older than 5 minutes were interrupted mid-send: SMTP outcome is
-    UNKNOWN, so they are never auto-retried — flag for manual resolution instead."""
+    """SENDING rows older than 10 minutes were interrupted mid-send. Instead of always
+    punting to a human, the sweeper first tries to PROVE the outcome by searching the
+    mailbox's Sent folder for the Message-ID that was stamped before the send:
+
+    - found      -> the email went out: mark SENT (nobody needs to do anything).
+    - not_found  -> it definitely didn't go out: re-book automatically (up to the
+                    attempt cap) through the normal scheduler.
+    - unknown    -> can't prove either way (IMAP down, no folder, no Message-ID):
+                    NEEDS_ATTENTION + a bell notification — today's manual path.
+
+    Safe against racing a live send: SMTP sockets time out in 10s, so nothing is
+    still legitimately SENDING after 10 minutes."""
     db = SessionLocal()
+    resolved = {"auto_sent": 0, "auto_retried": 0, "needs_attention": 0}
     try:
         cutoff = db_now(db) - STUCK_SENDING_AFTER
-        stuck = list(
+        stuck_ids = list(
             db.scalars(
-                select(EmailDraft)
-                .where(EmailDraft.status == DraftStatus.SENDING, EmailDraft.updated_at < cutoff)
-                .with_for_update(skip_locked=True)
+                select(EmailDraft.id).where(
+                    EmailDraft.status == DraftStatus.SENDING, EmailDraft.updated_at < cutoff
+                )
             )
         )
-        for draft in stuck:
-            draft.status = DraftStatus.NEEDS_ATTENTION
-            draft.error_message = (
-                "Dispatch was interrupted mid-send and the outcome is unknown. Check your mailbox's "
-                f"Sent folder (Message-ID {draft.message_id or 'not stamped'}) before retrying."
-            )[:1000]
-            _log(db, draft, "stuck", "SENDING for over 5 minutes — flagged for manual resolution.")
-            logger.error("Draft %s stuck in SENDING — flagged NEEDS_ATTENTION", draft.id)
-        db.commit()
-        return {"flagged": len(stuck)}
+        for draft_id in stuck_ids:
+            try:
+                # Lock one row at a time and commit per draft, so a slow IMAP check
+                # for one mailbox never holds locks over the whole batch.
+                draft = db.scalars(
+                    select(EmailDraft)
+                    .where(EmailDraft.id == draft_id, EmailDraft.status == DraftStatus.SENDING)
+                    .with_for_update(skip_locked=True)
+                ).first()
+                if draft:
+                    resolved[_resolve_stuck_draft(db, draft)] += 1
+            except Exception:
+                logger.exception("Stuck-dispatch resolution failed for draft %s", draft_id)
+                db.rollback()
+        return resolved
     finally:
         db.close()
+
+
+def _resolve_stuck_draft(db, draft: EmailDraft) -> str:
+    """Resolves one stuck SENDING draft; returns which counter to bump."""
+    lead = draft.lead
+    user_id = lead.lead_import.user_id if lead and lead.lead_import else None
+
+    verification = SentVerification.UNKNOWN
+    if user_id and draft.message_id:
+        mailboxes = MailboxConnectionRepository(db).list_for_user(user_id)
+        mailbox = next((m for m in mailboxes if m.is_connected), None)
+        if mailbox:
+            verification = verify_message_in_sent_folder(mailbox, draft.message_id)
+
+    if verification == SentVerification.FOUND:
+        draft.status = DraftStatus.SENT
+        draft.sent_at = draft.sent_at or db_now(db)
+        draft.error_message = None
+        _log(db, draft, "auto_verified_sent", "Interrupted dispatch confirmed in the Sent folder — marked sent.")
+        db.commit()
+        logger.info("Draft %s auto-verified as sent (Message-ID found in Sent folder)", draft.id)
+        return "auto_sent"
+
+    if verification == SentVerification.NOT_FOUND and user_id and draft.attempt_count < MAX_DISPATCH_ATTEMPTS:
+        # Proven not sent — safe to re-book; the normal dispatcher takes it from here.
+        try:
+            tz = ZoneInfo(draft.lead.timezone) if draft.lead.timezone else timezone.utc
+        except Exception:
+            tz = timezone.utc
+        acquire_user_schedule_lock(db, user_id)
+        slot = allocate_scheduled_slot(db, user_id, tz, db_now(db) + SCHEDULE_GAP, exclude_draft_id=draft.id)
+        draft.status = DraftStatus.SCHEDULED
+        draft.scheduled_at = slot
+        draft.error_message = (
+            f"Interrupted dispatch verified NOT sent — retrying automatically "
+            f"(attempt {draft.attempt_count}/{MAX_DISPATCH_ATTEMPTS})."
+        )[:1000]
+        _log(db, draft, "auto_retry_scheduled", "Sent folder confirmed the email never went out — re-booked.")
+        db.commit()
+        logger.info("Draft %s auto-retry booked for %s (verified not sent)", draft.id, slot)
+        return "auto_retried"
+
+    # UNKNOWN — or NOT_FOUND with the retry budget exhausted: a human decides.
+    reason = (
+        "Dispatch was interrupted mid-send and the outcome could not be verified automatically. "
+        if verification == SentVerification.UNKNOWN
+        else "Dispatch failed repeatedly (retry limit reached). "
+    )
+    draft.status = DraftStatus.NEEDS_ATTENTION
+    draft.error_message = (
+        f"{reason}Check your mailbox's Sent folder (Message-ID {draft.message_id or 'not stamped'}) before retrying."
+    )[:1000]
+    _log(db, draft, "stuck", f"{reason}Flagged for manual resolution.")
+    db.commit()  # the draft's state is durable BEFORE the best-effort notification
+    if user_id and lead:
+        try:
+            db.add(Notification(
+                user_id=user_id, lead_id=lead.id, kind="dispatch_needs_attention",
+                detail=f"An email to {lead.email or 'this lead'} was interrupted mid-send — open Outreach to resolve it."[:500],
+            ))
+            db.commit()
+        except IntegrityError:
+            db.rollback()  # an unread notification of this kind already exists for this lead
+    logger.error("Draft %s stuck in SENDING — flagged NEEDS_ATTENTION (%s)", draft.id, verification.value)
+    return "needs_attention"

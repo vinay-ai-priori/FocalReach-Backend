@@ -29,6 +29,10 @@ STEP_CALL = 6
 # from the fixed-cadence follow-up-due scan (STEP_FOLLOW_UP_LAST) and from occupying
 # a normal sequence slot — a lead can get any number of these across a conversation.
 STEP_SCHEDULING_REPLY = 100
+# Auto-sent "that slot isn't available — here are alternatives" reply, drafted by the
+# booking orchestrator when a lead's requested time can't be booked on Cal.com. Same
+# outside-the-cadence semantics as STEP_SCHEDULING_REPLY.
+STEP_SLOT_ALTERNATIVES = 101
 
 # Days after the previous email's dispatch at which the follow-up-due notification
 # fires, keyed by the follow-up's step_index: FU1 3d after initial, FU2 4d after FU1,

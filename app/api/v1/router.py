@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from app.api.v1 import (
     admin,
     auth,
+    bookings,
     calcom,
     campaigns,
     company_intelligence,
@@ -32,3 +33,4 @@ api_router.include_router(notifications.router)
 api_router.include_router(crm.router)
 api_router.include_router(mailboxes.router)
 api_router.include_router(calcom.router)
+api_router.include_router(bookings.router)

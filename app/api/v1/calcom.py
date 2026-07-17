@@ -30,17 +30,17 @@ from app.schemas.calcom import (
     CalComAuthorizeUrlOut,
     CalComBookingOut,
     CalComConnectionOut,
-    CalComEventTypeOut,
+    CalComEventTypeDetailOut,
     CalComSlotOut,
     CalComStatusOut,
     CreateEventTypeRequest,
     ExchangeCodeRequest,
-    SelectEventTypeRequest,
     SetTimezoneRequest,
+    UpdateEventTypeRequest,
     WorkingHoursRequest,
 )
 from app.services.calcom.client import calcom_client
-from app.services.calcom.slots import filter_future_slots
+from app.services.calcom.slots import filter_future_slots, parse_slot_start
 from app.services.calcom.token_service import get_valid_access_token
 
 logger = get_logger(__name__)
@@ -84,6 +84,22 @@ def exchange_code(
         last_error=None,
     )
     if existing:
+        # Reconnecting with a DIFFERENT Cal.com account: the stored event-type and
+        # schedule IDs belong to the previous account — keeping them would make every
+        # later API call pair the new token with the old account's resources (404s
+        # that look like "connected but nothing works"). Reset them so the user is
+        # cleanly prompted to create their event type again.
+        same_account = existing.calcom_username == me.get("username") and (
+            existing.calcom_user_email == me.get("email")
+        )
+        if not same_account:
+            fields.update(
+                selected_event_type_id=None,
+                selected_event_type_slug=None,
+                selected_event_type_title=None,
+                calcom_schedule_id=None,
+                calcom_schedule_name=None,
+            )
         connection = repo.update(existing, **fields)
     else:
         connection = repo.create(CalComConnection(user_id=user.id, timezone="UTC", **fields))
@@ -118,36 +134,26 @@ def _require_connection(db: Session, user: User) -> CalComConnection:
     return connection
 
 
-def _event_type_out(et: dict) -> CalComEventTypeOut:
-    return CalComEventTypeOut(
-        id=et["id"],
-        title=et["title"],
-        slug=et["slug"],
-        length_minutes=et.get("lengthInMinutes", 30),
-        description=et.get("description"),
-        hidden=et.get("hidden"),
-        schedule_id=et.get("scheduleId"),
-    )
-
-
-@router.get("/event-types", response_model=list[CalComEventTypeOut])
-def list_event_types(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> list[CalComEventTypeOut]:
-    _require_connection(db, user)
-    access_token = get_valid_access_token(db, user.id)
-    raw = calcom_client.list_event_types(access_token)
-    return [_event_type_out(et) for et in raw]
-
-
-@router.post("/event-types", response_model=CalComEventTypeOut)
-def create_event_type(
+@router.post("/event-type", response_model=CalComConnectionOut)
+def create_own_event_type(
     payload: CreateEventTypeRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)
-) -> CalComEventTypeOut:
-    """Creates a brand new event type on the user's Cal.com account, forwarding every
-    field the caller set (see CreateEventTypeRequest — a 1:1 map of Cal.com's own
-    create-event-type body). If the caller didn't explicitly set scheduleId and
-    working hours have been saved (POST /calcom/working-hours), the event type is
-    pointed at that schedule automatically; otherwise Cal.com applies its own default."""
+) -> CalComConnectionOut:
+    """Creates the user's ONE Cal.com event type — allowed exactly once per account.
+    There is no "choose from your existing event types" flow: this creates it AND
+    selects it in the same step, forwarding every field the caller set (see
+    CreateEventTypeRequest — a 1:1 map of Cal.com's own create-event-type body). If
+    the caller didn't explicitly set scheduleId and working hours have been saved
+    (POST /calcom/working-hours), the event type is pointed at that schedule
+    automatically; otherwise Cal.com applies its own default.
+
+    Once created, use PATCH /calcom/event-type to edit it — calling this again is
+    rejected so a user can never end up with two event types to choose between."""
+    repo = CalComConnectionRepository(db)
     connection = _require_connection(db, user)
+    if connection.selected_event_type_id:
+        raise ValidationFailedError(
+            "An event type has already been created for this account. Edit the existing one instead of creating another."
+        )
     access_token = get_valid_access_token(db, user.id)
 
     body = payload.model_dump(by_alias=True, exclude_none=True)
@@ -155,21 +161,52 @@ def create_event_type(
         body["scheduleId"] = connection.calcom_schedule_id
 
     created = calcom_client.create_event_type(access_token, body=body)
-    return _event_type_out(created)
-
-
-@router.post("/event-type", response_model=CalComConnectionOut)
-def select_event_type(
-    payload: SelectEventTypeRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)
-) -> CalComConnectionOut:
-    repo = CalComConnectionRepository(db)
-    connection = _require_connection(db, user)
     connection = repo.update(
         connection,
-        selected_event_type_id=payload.event_type_id,
-        selected_event_type_slug=payload.slug,
-        selected_event_type_title=payload.title,
+        selected_event_type_id=created["id"],
+        selected_event_type_slug=created["slug"],
+        selected_event_type_title=created["title"],
     )
+    return CalComConnectionOut.model_validate(connection)
+
+
+@router.get("/event-type", response_model=CalComEventTypeDetailOut)
+def get_own_event_type(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> CalComEventTypeDetailOut:
+    """Live values for the user's one event type, fetched fresh from Cal.com —
+    powers the edit form so it always starts from the real current settings rather
+    than fields FocalReach doesn't cache locally (length, description, notice)."""
+    connection = _require_connection(db, user)
+    if not connection.selected_event_type_id:
+        raise NotFoundError("No event type has been created yet.")
+    access_token = get_valid_access_token(db, user.id)
+    et = calcom_client.get_event_type(access_token, connection.selected_event_type_id)
+    return CalComEventTypeDetailOut(
+        title=et.get("title", connection.selected_event_type_title or ""),
+        slug=et.get("slug", connection.selected_event_type_slug or ""),
+        length_minutes=et.get("lengthInMinutes", 30),
+        description=et.get("description"),
+        minimum_booking_notice=et.get("minimumBookingNotice"),
+    )
+
+
+@router.patch("/event-type", response_model=CalComConnectionOut)
+def update_own_event_type(
+    payload: UpdateEventTypeRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> CalComConnectionOut:
+    """Edits the user's single event type in place on Cal.com — title, length,
+    description, and/or minimum booking notice. The slug (and therefore the booking
+    link already shown on Discovery Calls / sent to leads) is never touched."""
+    repo = CalComConnectionRepository(db)
+    connection = _require_connection(db, user)
+    if not connection.selected_event_type_id:
+        raise NotFoundError("No event type has been created yet.")
+    access_token = get_valid_access_token(db, user.id)
+
+    body = payload.model_dump(by_alias=True, exclude_none=True)
+    updated = calcom_client.update_event_type(access_token, connection.selected_event_type_id, body=body)
+
+    if payload.title is not None:
+        connection = repo.update(connection, selected_event_type_title=updated.get("title", payload.title))
     return CalComConnectionOut.model_validate(connection)
 
 
@@ -264,6 +301,37 @@ def upcoming_slots(
     )
     future = filter_future_slots(raw_slots, now)
     return [CalComSlotOut(start=s["start"], end=s.get("end")) for s in future[:count]]
+
+
+@router.get("/slots/day", response_model=list[CalComSlotOut])
+def slots_for_day(
+    date: str = Query(pattern=r"^\d{4}-\d{2}-\d{2}$", description="YYYY-MM-DD in the user's Cal.com timezone"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[CalComSlotOut]:
+    """All open slots on one specific day (user's Cal.com timezone) — powers the
+    calendar-driven manual booking flow. Past slots within the day are excluded."""
+    connection = _require_connection(db, user)
+    if not connection.selected_event_type_id:
+        raise ValidationFailedError("Select an event type before requesting available slots.")
+    try:
+        day = datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=ZoneInfo(connection.timezone))
+    except ValueError:
+        raise ValidationFailedError(f"'{date}' is not a valid calendar date.")
+
+    access_token = get_valid_access_token(db, user.id)
+    raw_slots = calcom_client.get_slots(
+        access_token,
+        event_type_id=connection.selected_event_type_id,
+        timezone_name=connection.timezone,
+        start=day,
+        end=day + timedelta(days=1),
+    )
+    now = datetime.now(ZoneInfo(connection.timezone))
+    future = filter_future_slots(raw_slots, now)
+    day_end = day + timedelta(days=1)
+    in_day = [s for s in future if day <= parse_slot_start(s["start"]) < day_end]
+    return [CalComSlotOut(start=s["start"], end=s.get("end")) for s in in_day]
 
 
 @router.post("/bookings", response_model=CalComBookingOut)

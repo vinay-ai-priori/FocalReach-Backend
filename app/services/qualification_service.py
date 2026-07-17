@@ -15,12 +15,16 @@ Flow (in order, cheapest first):
 """
 
 import json
+from functools import lru_cache
 
+import pycountry
+import pycountry_convert
 from rapidfuzz import fuzz
 from sqlalchemy.orm import Session
 
 from app.core.logging import get_logger
 from app.models.company import Company, QualificationStatus
+from app.models.company_intelligence import CompanyIntelligence
 from app.models.icp import ICP
 from app.models.lead_import import ImportStatus, LeadImport
 from app.repositories.company_repository import CompanyRepository
@@ -32,25 +36,54 @@ logger = get_logger(__name__)
 QUALIFIED_THRESHOLD = 55.0
 REVIEW_THRESHOLD = 40.0
 
-# Common geography aliases so "USA" matches "United States", etc.
+# Names pycountry can't resolve directly: common short names, endonyms, initialism
+# variants. Values must be resolvable by pycountry.countries.lookup().
 GEO_ALIASES = {
-    "usa": "united states", "us": "united states", "u.s.": "united states",
-    "uk": "united kingdom", "u.k.": "united kingdom", "uae": "united arab emirates",
-    "deutschland": "germany", "holland": "netherlands",
+    "uk": "GB", "great britain": "GB", "england": "GB", "scotland": "GB", "wales": "GB",
+    "uae": "AE", "türkiye": "TR", "turkey": "TR",
+    "russia": "RU", "ivory coast": "CI", "holland": "NL", "deutschland": "DE",
+    "españa": "ES", "espana": "ES", "italia": "IT", "sverige": "SE", "norge": "NO",
+    "suomi": "FI", "österreich": "AT", "osterreich": "AT", "schweiz": "CH",
+    "turkiye": "TR", "north korea": "KP", "laos": "LA", "syria": "SY", "iran": "IR",
+    "venezuela": "VE", "bolivia": "BO", "tanzania": "TZ", "moldova": "MD",
+    "brunei": "BN", "cape verde": "CV", "vatican": "VA", "palestine": "PS",
+    "macedonia": "MK", "swaziland": "SZ", "burma": "MM",
 }
-REGION_MEMBERS = {
-    "north america": {"united states", "canada", "mexico"},
-    "europe": {
-        "united kingdom", "germany", "france", "netherlands", "spain", "italy", "sweden", "norway",
-        "denmark", "finland", "ireland", "belgium", "switzerland", "austria", "poland", "portugal",
-    },
-    "northern europe": {"united kingdom", "sweden", "norway", "denmark", "finland", "ireland", "netherlands"},
-    "apac": {"australia", "japan", "singapore", "india", "china", "south korea", "new zealand"},
-    "emea": set(),  # broad; treated as match-any for Europe/Middle East/Africa via region check below
+
+_MIDDLE_EAST = {"AE", "SA", "QA", "KW", "BH", "OM", "IL", "JO", "LB", "IQ", "IR", "SY", "YE", "PS", "TR", "EG"}
+_LATAM_EXTRA = {"MX", "GT", "HN", "SV", "NI", "CR", "PA", "BZ", "CU", "DO", "HT", "PR"}
+
+# Business regions an ICP may target, defined by continent codes (from ISO 3166 via
+# pycountry-convert: NA, SA, EU, AS, AF, OC) plus curated country sets where no ISO
+# grouping exists. Any country on Earth resolves into these — nothing is hand-listed
+# per region except genuinely non-ISO groupings (Middle East, Nordics, ...).
+REGION_DEFS: dict[str, dict] = {
+    "europe": {"continents": {"EU"}},
+    "north america": {"continents": {"NA"}},
+    "south america": {"continents": {"SA"}},
+    "latam": {"continents": {"SA"}, "countries": _LATAM_EXTRA},
+    "latin america": {"continents": {"SA"}, "countries": _LATAM_EXTRA},
+    "asia": {"continents": {"AS"}},
+    "africa": {"continents": {"AF"}},
+    "oceania": {"continents": {"OC"}},
+    "americas": {"continents": {"NA", "SA"}},
+    "apac": {"continents": {"AS", "OC"}},
+    "asia pacific": {"continents": {"AS", "OC"}},
+    "emea": {"continents": {"EU", "AF"}, "countries": _MIDDLE_EAST},
+    "middle east": {"countries": _MIDDLE_EAST},
+    "gcc": {"countries": {"AE", "SA", "QA", "KW", "BH", "OM"}},
+    "nordics": {"countries": {"SE", "NO", "DK", "FI", "IS"}},
+    "northern europe": {"countries": {"GB", "IE", "SE", "NO", "DK", "FI", "IS", "NL", "EE", "LV", "LT"}},
+    "dach": {"countries": {"DE", "AT", "CH"}},
+    "benelux": {"countries": {"BE", "NL", "LU"}},
+    "anz": {"countries": {"AU", "NZ"}},
+    "global": {"any": True},
+    "worldwide": {"any": True},
+    "international": {"any": True},
 }
 
 SCORING_SYSTEM_PROMPT = """You are an impartial B2B sales-qualification analyst. You evaluate how well a prospect company matches an Ideal Customer Profile (ICP).
-Judge ONLY from the inputs provided. Be strictly neutral: no bias toward or against any industry, region, company type, or business model. Do not assume facts that are not in the inputs. Missing or thin data should lower confidence, reflected as a mid-to-low score — never guess in either direction.
+Judge ONLY from the inputs provided. Be strictly neutral: no bias toward or against any industry, region, company type, or business model. Do not assume facts that are not in the inputs. Missing or thin data should lower confidence, reflected as a mid-to-low score — never guess in either direction. If there is essentially NO usable evidence about the prospect (no industry, no description, no enrichment), return 40-50 on both scores: absence of evidence means a human should review, not an automatic rejection.
 
 Score two independent dimensions, each 0-100:
 
@@ -58,32 +91,87 @@ Score two independent dimensions, each 0-100:
 
 2. company_fit_score — how well the prospect's enriched website profile aligns with the ICP fit keywords and the campaign objective. Consider what the company does, who it serves, its technologies, and the problems it addresses — does this company look like one the campaign objective is aimed at? If the enrichment profile is unavailable, base this on the CSV description alone and cap your confidence accordingly.
 
+Additionally, extract solvable pain points: concrete problems the PROSPECT company plausibly faces that the SENDER company's services can solve. Strict grounding rules:
+- Each pain point must be supported by specific evidence in the prospect's data (their offerings, use cases, technologies, news, or description) — quote or paraphrase that evidence.
+- Each must map to a specific sender service or value proposition — name it in solved_by.
+- No generic filler ("needs more customers"), no speculation beyond the evidence. If nothing credible is supported, return an empty list. 0-4 items maximum.
+
 Return ONLY a JSON object:
 {
   "industry_match_score": number (0-100),
   "company_fit_score": number (0-100),
-  "reasoning": string (2-4 sentences explaining both scores)
+  "reasoning": string (2-4 sentences explaining both scores),
+  "solvable_pain_points": [
+    {"pain_point": string, "evidence": string, "solved_by": string}
+  ]
 }"""
 
 
-def _norm_geo(value: str) -> str:
-    value = value.strip().lower()
-    return GEO_ALIASES.get(value, value)
+@lru_cache(maxsize=4096)
+def _canon_country(value: str) -> str | None:
+    """Resolve any country spelling to its ISO alpha-2 code, or None if unrecognizable.
+
+    Order: alias map -> pycountry lookup (names, official names, ISO codes) ->
+    dot/space-stripped retry ("U.S.A.") -> fuzzy match against all country names
+    (typos like "Untied States"; ratio 90 keeps Austria/Australia apart).
+    """
+    raw = value.strip().lower()
+    if not raw:
+        return None
+    candidates = [GEO_ALIASES.get(raw, raw), raw.replace(".", "").replace(" ", "")]
+    for candidate in candidates:
+        try:
+            return pycountry.countries.lookup(candidate).alpha_2
+        except LookupError:
+            continue
+    best, best_score = None, 0.0
+    for c in pycountry.countries:
+        for name in filter(None, (getattr(c, "name", None), getattr(c, "common_name", None), getattr(c, "official_name", None))):
+            score = fuzz.ratio(raw, name.lower())
+            if score > best_score:
+                best, best_score = c.alpha_2, score
+    return best if best_score >= 90 else None
+
+
+@lru_cache(maxsize=512)
+def _continent_of(alpha2: str) -> str | None:
+    try:
+        return pycountry_convert.country_alpha2_to_continent_code(alpha2)
+    except KeyError:
+        return None
+
+
+def _in_region(alpha2: str, region: dict) -> bool:
+    if region.get("any"):
+        return True
+    if alpha2 in region.get("countries", set()):
+        return True
+    continent = _continent_of(alpha2)
+    return continent is not None and continent in region.get("continents", set())
 
 
 def check_geography(company: Company, icp: ICP) -> dict:
-    targets = [_norm_geo(g) for g in (icp.target_geographies or [])]
+    targets = [t.strip() for t in (icp.target_geographies or []) if t and t.strip()]
     if not targets:
         return {"check": "geography", "result": "pass", "detail": "No geography filter set on the ICP."}
-    country = company.country and _norm_geo(company.country)
-    if not country:
+    if not (company.country or "").strip():
         return {"check": "geography", "result": "unknown", "detail": "Company country is missing from the CSV."}
+
+    alpha2 = _canon_country(company.country)
+    if alpha2 is None:
+        return {
+            "check": "geography", "result": "unknown",
+            "detail": f"Could not recognize '{company.country}' as a country — routed to review.",
+        }
+
     for target in targets:
-        if target == country or fuzz.ratio(target, country) >= 90:
+        region = REGION_DEFS.get(target.lower())
+        if region is not None:
+            if _in_region(alpha2, region):
+                return {"check": "geography", "result": "pass", "detail": f"{company.country} is within region '{target}'."}
+            continue
+        if _canon_country(target) == alpha2:
             return {"check": "geography", "result": "pass", "detail": f"{company.country} matches target '{target}'."}
-        members = REGION_MEMBERS.get(target)
-        if members is not None and (not members or country in members):
-            return {"check": "geography", "result": "pass", "detail": f"{company.country} is within region '{target}'."}
     return {"check": "geography", "result": "fail", "detail": f"{company.country} is outside the target geographies."}
 
 
@@ -127,14 +215,55 @@ def _to_score(value) -> float:
         return 0.0
 
 
-def score_company_fit(company: Company, icp: ICP) -> tuple[float, float, str]:
-    """One LLM call -> (industry_match_score, company_fit_score, reasoning)."""
-    profile = company.enrichment_profile
-    user_prompt = (
+def _stable_prompt_prefix(icp: ICP, intelligence: CompanyIntelligence | None) -> str:
+    """ICP + sender blocks, identical for every company in an import.
+
+    Prompt-caching design: the user prompt is ordered static-first — this prefix,
+    then the per-company prospect block last. Combined with the fixed system prompt,
+    every call in an import shares a long identical prefix, so OpenAI's automatic
+    prefix caching (1024+ tokens) discounts all calls after the first.
+    """
+    sender_lines = ["SENDER COMPANY (the company running this campaign):"]
+    if intelligence:
+        sender_lines += [
+            f"- Name: {intelligence.company_name or 'Not provided'}",
+            f"- Summary: {intelligence.summary or 'Not provided'}",
+            f"- Services: {json.dumps(intelligence.services or [])}",
+            f"- Value propositions: {json.dumps(intelligence.value_propositions or [])}",
+        ]
+    else:
+        sender_lines.append("Not available — return an empty solvable_pain_points list.")
+    return (
         "ICP (Ideal Customer Profile):\n"
         f"- Target industries: {icp.target_industries or []}\n"
         f"- Fit keywords: {icp.target_keywords or []}\n"
         f"- Campaign objective: {icp.campaign_objective or 'Not specified'}\n\n"
+        + "\n".join(sender_lines)
+    )
+
+
+def _to_pain_points(value) -> list[dict]:
+    """Validate the LLM's solvable_pain_points; malformed output degrades to []."""
+    if not isinstance(value, list):
+        return []
+    points = []
+    for item in value[:4]:
+        if isinstance(item, dict) and item.get("pain_point"):
+            points.append({
+                "pain_point": str(item.get("pain_point") or ""),
+                "evidence": str(item.get("evidence") or ""),
+                "solved_by": str(item.get("solved_by") or ""),
+            })
+    return points
+
+
+def score_company_fit(
+    company: Company, icp: ICP, intelligence: CompanyIntelligence | None = None
+) -> tuple[float, float, str, list[dict]]:
+    """One LLM call -> (industry_match_score, company_fit_score, reasoning, solvable_pain_points)."""
+    profile = company.enrichment_profile
+    user_prompt = (
+        f"{_stable_prompt_prefix(icp, intelligence)}\n\n"
         "PROSPECT COMPANY (from CSV):\n"
         f"- Name: {company.name}\n"
         f"- Industry: {company.industry or 'Not provided'}\n"
@@ -147,10 +276,13 @@ def score_company_fit(company: Company, icp: ICP) -> tuple[float, float, str]:
         _to_score(data.get("industry_match_score")),
         _to_score(data.get("company_fit_score")),
         str(data.get("reasoning") or ""),
+        _to_pain_points(data.get("solvable_pain_points")),
     )
 
 
-def qualify_company(db: Session, company: Company, icp: ICP) -> tuple[QualificationStatus, list[dict]]:
+def qualify_company(
+    db: Session, company: Company, icp: ICP, intelligence: CompanyIntelligence | None = None
+) -> tuple[QualificationStatus, list[dict]]:
     """Gates first (no cost), then enrichment + LLM scoring for gate passers."""
     checks = [check_geography(company, icp), check_employee_size(company, icp)]
     gate_results = {c["result"] for c in checks}
@@ -164,7 +296,7 @@ def qualify_company(db: Session, company: Company, icp: ICP) -> tuple[Qualificat
     enrich_company(db, company)
 
     try:
-        industry_score, fit_score, reasoning = score_company_fit(company, icp)
+        industry_score, fit_score, reasoning, pain_points = score_company_fit(company, icp, intelligence)
     except Exception as exc:
         logger.warning("LLM qualification scoring failed for %s: %s", company.name, exc)
         checks.append({"check": "fit_scoring", "result": "unknown", "detail": "AI scoring failed — routed to review."})
@@ -173,6 +305,7 @@ def qualify_company(db: Session, company: Company, icp: ICP) -> tuple[Qualificat
     company.industry_match_score = industry_score
     company.company_fit_score = fit_score
     company.qualification_reasoning = reasoning
+    company.solvable_pain_points = pain_points or None
 
     average = round((industry_score + fit_score) / 2, 1)
     if average > QUALIFIED_THRESHOLD:
@@ -211,6 +344,8 @@ _HEAVY_COMPANY_FIELDS = ["enrichment_content", "enrichment_profile", "qualificat
 
 def qualify_import(db: Session, lead_import: LeadImport, icp: ICP) -> dict:
     repo = CompanyRepository(db)
+    # Sender profile is per-import-stable: fetched once, reused for every scoring call.
+    intelligence = icp.company_intelligence
     counts = {"approved": 0, "rejected": 0, "review": 0}
     batch: list = []
     for company in repo.list_for_import(lead_import.id):
@@ -220,7 +355,7 @@ def qualify_import(db: Session, lead_import: LeadImport, icp: ICP) -> dict:
         if company.qualification_override or company.qualification_checks is not None:
             counts[company.qualification_status.value] = counts.get(company.qualification_status.value, 0) + 1
             continue
-        status, checks = qualify_company(db, company, icp)
+        status, checks = qualify_company(db, company, icp, intelligence)
         company.qualification_status = status
         company.qualification_checks = checks
         counts[status.value] += 1

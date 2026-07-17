@@ -153,7 +153,11 @@ def route_reply(db: Session, inbound_reply: InboundReply) -> None:
 
         elif result.intent == ReplyIntent.NEUTRAL:
             _pause_lead(db, lead)
-            _notify(db, user_id, lead, "reply_neutral", f"Wants to wait: “{excerpt}”")
+            _notify(
+                db, user_id, lead, "reply_neutral",
+                f"Wants to wait: “{excerpt}” — outreach paused. You can reply manually now, "
+                "or resume outreach from the lead's page when the timing is right.",
+            )
 
         elif result.intent == ReplyIntent.BOOKED:
             _pause_lead(db, lead)
@@ -189,26 +193,38 @@ def _handle_booked(db: Session, lead: Lead, user_id: int, inbound_reply: Inbound
     else:
         status = PendingBookingStatus.NEEDS_REVIEW
 
-    db.add(
-        PendingBooking(
-            lead_id=lead.id,
-            inbound_reply_id=inbound_reply.id,
-            user_id=user_id,
-            status=status,
-            resolved_start=resolved_start,
-            resolved_timezone=display_tz if resolved_start else None,
-            timezone_source=TimezoneSource(source) if resolved_start else TimezoneSource.UNKNOWN,
-            raw_extraction=extracted.raw,
-        )
+    booking = PendingBooking(
+        lead_id=lead.id,
+        inbound_reply_id=inbound_reply.id,
+        user_id=user_id,
+        status=status,
+        resolved_start=resolved_start,
+        resolved_timezone=display_tz if resolved_start else None,
+        timezone_source=TimezoneSource(source) if resolved_start else TimezoneSource.UNKNOWN,
+        raw_extraction=extracted.raw,
     )
+    db.add(booking)
     db.commit()
 
     if resolved_start:
         when = resolved_start.astimezone(
             ZoneInfo(display_tz) if display_tz else timezone.utc
         ).strftime("%a %b %d, %I:%M %p %Z")
-        detail = f"Wants to book: {when}. Cal.com booking isn't wired up yet — confirm manually."
+        detail = f"Wants to book: {when}. Booking it on Cal.com automatically…"
+        # Hand off to the booking orchestrator. A lost enqueue is not fatal — the
+        # booking.sweep_stale beat task re-processes PENDING rows within 5 minutes.
+        try:
+            enqueue_booking_processing(booking.id)
+        except Exception:
+            logger.warning("Could not enqueue booking processing for pending_booking %s", booking.id, exc_info=True)
     else:
         detail = "Wants to book a call but the date/time wasn't clear enough to auto-resolve — check the reply."
 
     _notify(db, user_id, lead, "reply_booked", detail)
+
+
+def enqueue_booking_processing(booking_id: int) -> None:
+    """Seam for tests; imports lazily to keep celery out of this module's import path."""
+    from app.tasks.booking_tasks import process_pending
+
+    process_pending.delay(booking_id)
