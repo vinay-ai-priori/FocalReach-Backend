@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String
+from sqlalchemy import CheckConstraint, DateTime, Enum, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, PublicIDMixin, TimestampMixin
@@ -14,11 +14,18 @@ class UserRole(str, enum.Enum):
 
 class User(Base, PublicIDMixin, TimestampMixin):
     __tablename__ = "users"
+    __table_args__ = (
+        # NULL organization allowed ONLY for the super admin, who sits outside every
+        # organization — enforced by the DB, not convention.
+        CheckConstraint(
+            "role = 'SUPER_ADMIN' OR organization_id IS NOT NULL",
+            name="ck_users_org_required_unless_superadmin",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    # NULL only for the super admin, who sits outside every organization.
     organization_id: Mapped[int | None] = mapped_column(
-        ForeignKey("organizations.id", ondelete="SET NULL"), nullable=True, index=True
+        ForeignKey("organizations.id", ondelete="RESTRICT"), nullable=True, index=True
     )
     email: Mapped[str] = mapped_column(String(320), nullable=False, unique=True, index=True)
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)

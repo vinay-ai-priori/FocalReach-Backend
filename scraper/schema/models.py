@@ -58,6 +58,13 @@ class TechSignals(BaseModel):
     detected_tools: list[str] = Field(default_factory=list)
 
 
+class GrowthSignals(BaseModel):
+    """Hiring/growth evidence extracted from the careers page."""
+
+    roles_hiring: list[str] = Field(default_factory=list)
+    tech_stack_mentions: list[str] = Field(default_factory=list)
+
+
 class RawPage(BaseModel):
     url: str
     page_type: str
@@ -94,4 +101,5 @@ class ScrapeResult(BaseModel):
     news: list[NewsItem] = Field(default_factory=list)
     social_proof: SocialProof = Field(default_factory=SocialProof)
     tech_signals: TechSignals = Field(default_factory=TechSignals)
+    growth_signals: GrowthSignals = Field(default_factory=GrowthSignals)
     stats: ScrapeStats = Field(default_factory=ScrapeStats)

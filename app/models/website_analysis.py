@@ -22,11 +22,18 @@ class WebsiteAnalysis(Base, PublicIDMixin, TimestampMixin):
     within the same org reuses the row."""
 
     __tablename__ = "website_analyses"
-    __table_args__ = (UniqueConstraint("organization_id", "domain", name="uq_analysis_org_domain"),)
+    # NULLS NOT DISTINCT: the super admin's rows (organization_id NULL) still dedupe
+    # by domain — without it Postgres would treat every NULL as unique.
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id", "domain", name="uq_analysis_org_domain", postgresql_nulls_not_distinct=True
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # NULL = owned by the super admin, who sits outside every organization.
     organization_id: Mapped[int | None] = mapped_column(
-        ForeignKey("organizations.id", ondelete="SET NULL"), nullable=True, index=True
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True, index=True
     )
     url: Mapped[str] = mapped_column(String(2048), nullable=False)
     domain: Mapped[str] = mapped_column(String(255), nullable=False, index=True)

@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
+from scraper.config.page_taxonomy import PAGE_TYPE_MAX_PAGES
 from scraper.config.settings import DEFAULT_SETTINGS, ScraperSettings
 from scraper.discover import ScoredLink, discover_pages, get_sitemap_urls, root_domain_of
 from scraper.extract import aggregate, news_items_from_pages, parse_feed, process_page
@@ -22,11 +24,20 @@ def _normalize_base_url(url: str) -> str:
 
 def _select_pages(ranked: list[ScoredLink]) -> list[ScoredLink]:
     """
-    Selects every discovered page except pure-noise types (legal/privacy/
-    terms), which carry no ICP or email-drafting value. No numeric cap:
-    completeness takes priority over trimming the crawl here.
+    Keeps only the scoped page types, capped per type (PAGE_TYPE_MAX_PAGES),
+    highest-scored first. Everything else — including "other" and zero-score
+    links — is dropped: latency/cost budget goes only to pages downstream
+    agents actually consume.
     """
-    return [link for link in ranked if link.page_type != "legal"]
+    taken: dict[str, int] = {}
+    selected: list[ScoredLink] = []
+    for link in ranked:
+        cap = PAGE_TYPE_MAX_PAGES.get(link.page_type, 0)
+        if link.score <= 0 or taken.get(link.page_type, 0) >= cap:
+            continue
+        taken[link.page_type] = taken.get(link.page_type, 0) + 1
+        selected.append(link)
+    return selected
 
 
 async def scrape_company_site(
@@ -40,6 +51,7 @@ async def scrape_company_site(
     domain = root_domain_of(base_url)
 
     async def _run() -> ScrapeResult:
+        nonlocal base_url
         timings: dict[str, int] = {}
 
         # Homepage fetch and sitemap/robots discovery are independent of
@@ -49,9 +61,23 @@ async def scrape_company_site(
             fetch_urls([base_url], settings, runtime),
             get_sitemap_urls(base_url, runtime.client, settings),
         )
-        timings["fetch_homepage_and_sitemap_ms"] = int((time.monotonic() - t0) * 1000)
 
         home = home_results[0]
+        # Some sites serve only the www. host and refuse connections on the
+        # apex domain — retry once with the www. variant before giving up.
+        parsed_host = urlparse(base_url).netloc
+        if not home.ok and not parsed_host.startswith("www."):
+            www_url = base_url.replace(parsed_host, f"www.{parsed_host}", 1)
+            (home_results, www_fallback_count), sitemap_urls = await asyncio.gather(
+                fetch_urls([www_url], settings, runtime),
+                get_sitemap_urls(www_url, runtime.client, settings),
+            )
+            home = home_results[0]
+            home_fallback_count += www_fallback_count
+            if home.ok:
+                base_url = www_url
+        timings["fetch_homepage_and_sitemap_ms"] = int((time.monotonic() - t0) * 1000)
+
         if not home.ok:
             return ScrapeResult(
                 domain=domain,

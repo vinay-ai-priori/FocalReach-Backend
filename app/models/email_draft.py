@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Text
+from sqlalchemy import DateTime, Enum, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -58,6 +58,18 @@ class DraftStatus(str, enum.Enum):
 
 class EmailDraft(Base, PublicIDMixin, TimestampMixin):
     __tablename__ = "email_drafts"
+    __table_args__ = (
+        # One draft per fixed sequence slot per lead. Auto-reply steps (>= 100) are
+        # exempt — a lead can accumulate any number of those across a conversation.
+        Index(
+            "ux_email_drafts_lead_step",
+            "lead_id",
+            "channel",
+            "step_index",
+            unique=True,
+            postgresql_where=text("step_index < 100"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     lead_id: Mapped[int] = mapped_column(ForeignKey("leads.id", ondelete="CASCADE"), nullable=False, index=True)

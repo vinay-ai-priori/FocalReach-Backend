@@ -35,7 +35,7 @@ def list_notifications(user: User = Depends(get_current_user), db: Session = Dep
         select(Notification, Lead, Campaign)
         .join(Lead, Notification.lead_id == Lead.id)
         .join(LeadImport, Lead.lead_import_id == LeadImport.id)
-        .outerjoin(Campaign, Campaign.lead_import_id == LeadImport.id)
+        .join(Campaign, LeadImport.campaign_id == Campaign.id)
         .where(Notification.user_id == user.id, Notification.read_at.is_(None))
         .order_by(Notification.id.desc())
     ).all()
@@ -55,5 +55,5 @@ def mark_read(
         notification.read_at = datetime.now(timezone.utc)
         db.commit()
     lead = notification.lead
-    campaign = db.scalars(select(Campaign).where(Campaign.lead_import_id == lead.lead_import_id)).first()
+    campaign = lead.lead_import.campaign if lead.lead_import else None
     return _out(notification, lead, campaign)

@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String
+from sqlalchemy import DateTime, Enum, ForeignKey, Index, Integer, String, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -30,6 +30,15 @@ class PendingBooking(Base, PublicIDMixin, TimestampMixin):
     requested time is outside working hours / already taken."""
 
     __tablename__ = "pending_bookings"
+    __table_args__ = (
+        # One live booking attempt per inbound reply — cancelled ones don't block a retry.
+        Index(
+            "ux_pending_bookings_reply_live",
+            "inbound_reply_id",
+            unique=True,
+            postgresql_where=text("status != 'CANCELLED'"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     lead_id: Mapped[int] = mapped_column(ForeignKey("leads.id", ondelete="CASCADE"), nullable=False, index=True)

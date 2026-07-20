@@ -3,6 +3,7 @@
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import NotFoundError
+from app.models.campaign import Campaign
 from app.models.company_intelligence import CompanyIntelligence
 from app.models.icp import ICP
 from app.repositories.icp_repository import ICPRepository
@@ -19,10 +20,10 @@ Return ONLY a JSON object with exactly these keys:
 }"""
 
 
-def generate_icp(db: Session, intelligence: CompanyIntelligence, user_id: int | None = None) -> ICP:
+def generate_icp(db: Session, intelligence: CompanyIntelligence, campaign: Campaign) -> ICP:
     repo = ICPRepository(db)
 
-    existing = repo.get_active_for_intelligence(intelligence.id, user_id)
+    existing = repo.get_active_for_campaign(campaign.id)
     if existing:
         return existing
 
@@ -41,8 +42,8 @@ def generate_icp(db: Session, intelligence: CompanyIntelligence, user_id: int | 
     objectives = [o for o in (data.get("campaign_objectives") or []) if isinstance(o, str) and o.strip()]
 
     icp = ICP(
+        campaign_id=campaign.id,
         company_intelligence_id=intelligence.id,
-        user_id=user_id,
         campaign_objective=objectives[0] if objectives else None,
         campaign_objective_options=objectives,
         target_industries=data.get("target_industries") or [],

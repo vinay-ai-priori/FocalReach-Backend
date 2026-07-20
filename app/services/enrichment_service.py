@@ -6,6 +6,9 @@ proof, tech signals) feeds downstream fit scoring and email personalization.
 """
 
 import asyncio
+import threading
+from concurrent.futures import Future
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
@@ -38,20 +41,83 @@ SCRAPER_SETTINGS = ScraperSettings(
 ENRICHMENT_CONTENT_MAX_CHARS = 20_000
 
 
-async def _scrape_many(urls: list[str]) -> list[ScrapeResult | BaseException]:
-    """Scrape up to QUALIFY_PARALLELISM sites concurrently against one shared runtime.
+@dataclass
+class EnrichmentWave:
+    """One wave's in-flight enrichment: which companies are being scraped (cache
+    misses) and the Future carrying their network results."""
 
-    Returns results in input order; a failed scrape yields its exception instead of
-    aborting the whole wave.
-    """
-    async with ScraperRuntime(SCRAPER_SETTINGS) as runtime:
+    to_scrape: list[tuple[Company, str | None]] = field(default_factory=list)
+    future: Future | None = None
+
+
+class EnrichmentSession:
+    """One shared scraper runtime (httpx pool + lazy Chromium) for a whole import run,
+    living on a dedicated background event-loop thread.
+
+    Split of responsibilities is strict: the loop thread does NETWORK ONLY; every DB
+    read/write (cache lookups, applying results) happens on the caller's thread. That
+    is what makes wave pipelining safe — the caller can score wave N on its own thread
+    (with its own DB session) while wave N+1's scrape runs here concurrently."""
+
+    def __init__(self) -> None:
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(target=self._run_loop, daemon=True, name="enrichment-loop")
+        self._thread.start()
+        self._runtime: ScraperRuntime = asyncio.run_coroutine_threadsafe(
+            self._start_runtime(), self._loop
+        ).result()
+
+    def _run_loop(self) -> None:
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_forever()
+
+    async def _start_runtime(self) -> ScraperRuntime:
+        return await ScraperRuntime(SCRAPER_SETTINGS).__aenter__()
+
+    async def _scrape_many(self, urls: list[str]) -> list[ScrapeResult | BaseException]:
         return await asyncio.gather(
             *[
-                scrape_company_site(url, runtime, SCRAPER_SETTINGS, openai_api_key=app_settings.OPENAI_API_KEY)
+                scrape_company_site(
+                    url, self._runtime, SCRAPER_SETTINGS, openai_api_key=app_settings.OPENAI_API_KEY
+                )
                 for url in urls
             ],
             return_exceptions=True,
         )
+
+    def start_wave(self, db: Session, companies: list[Company]) -> EnrichmentWave:
+        """Resolve caches on THIS thread, then launch the misses' scrape in the
+        background. Returns immediately — pair with finish_wave()."""
+        wave = EnrichmentWave(to_scrape=_plan_wave(db, companies))
+        if wave.to_scrape:
+            wave.future = asyncio.run_coroutine_threadsafe(
+                self._scrape_many([company.website for company, _ in wave.to_scrape]), self._loop
+            )
+        return wave
+
+    def finish_wave(self, db: Session, wave: EnrichmentWave) -> None:
+        """Block until the wave's scrapes land, then apply results + commit (caller's
+        thread — the only thread that ever touches the DB session)."""
+        if wave.future is not None:
+            try:
+                results = wave.future.result()
+            except Exception as exc:  # loop/runtime failure hits the whole wave
+                logger.warning("Enrichment wave failed: %s", exc)
+                results = [exc] * len(wave.to_scrape)
+            for (company, domain), result in zip(wave.to_scrape, results):
+                _apply_scrape(db, company, domain, result)
+        db.commit()
+
+    def close(self) -> None:
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._runtime.__aexit__(None, None, None), self._loop
+            ).result(timeout=30)
+        except Exception as exc:
+            logger.warning("Enrichment runtime teardown failed: %s", exc)
+        finally:
+            self._loop.call_soon_threadsafe(self._loop.stop)
+            self._thread.join(timeout=5)
 
 
 def _profile_as_text(result: ScrapeResult) -> str:
@@ -66,8 +132,6 @@ def _profile_as_text(result: ScrapeResult) -> str:
         lines.append(f"Key features: {', '.join(offering.key_features)}")
     if offering.integrations:
         lines.append(f"Integrations: {', '.join(offering.integrations)}")
-    if offering.pricing_model_hint:
-        lines.append(f"Pricing model: {offering.pricing_model_hint}")
     if offering.target_customer_hint:
         lines.append(f"Target customer: {offering.target_customer_hint}")
 
@@ -76,13 +140,9 @@ def _profile_as_text(result: ScrapeResult) -> str:
         lines.append(f"Industries served: {', '.join(signals.industries_served)}")
     if signals.use_cases:
         lines.append(f"Use cases: {', '.join(signals.use_cases)}")
-    if signals.customer_logos:
-        lines.append(f"Customers: {', '.join(signals.customer_logos)}")
     for snippet in signals.case_study_snippets:
         if snippet.summary:
             lines.append(f"Case study ({snippet.customer or 'customer'}): {snippet.summary}")
-    if signals.certifications_compliance:
-        lines.append(f"Certifications/compliance: {', '.join(signals.certifications_compliance)}")
 
     for person in result.people:
         parts = [p for p in (person.name, person.title) if p]
@@ -92,10 +152,10 @@ def _profile_as_text(result: ScrapeResult) -> str:
         if item.title:
             date = f" ({item.date.date().isoformat()})" if item.date else ""
             lines.append(f"News{date}: {item.title}. {item.summary or ''}".strip())
-    for quote in result.social_proof.testimonials:
-        lines.append(f"Testimonial: {quote}")
-    if result.social_proof.awards:
-        lines.append(f"Awards: {', '.join(result.social_proof.awards)}")
+    if result.growth_signals.roles_hiring:
+        lines.append(f"Hiring for: {', '.join(result.growth_signals.roles_hiring)}")
+    if result.growth_signals.tech_stack_mentions:
+        lines.append(f"Tech stack (from job posts): {', '.join(result.growth_signals.tech_stack_mentions)}")
     if result.tech_signals.detected_tools:
         lines.append(f"Technologies detected: {', '.join(result.tech_signals.detected_tools)}")
 
@@ -151,10 +211,13 @@ def _apply_scrape(db: Session, company: Company, domain: str | None, result: Scr
         company.enriched_at_status = "failed"
         return
 
+    now = datetime.now(timezone.utc)
     company.enrichment_profile = result.model_dump(mode="json", exclude={"stats"})
     if not company.enrichment_content:
         company.enrichment_content = _profile_as_text(result)
     company.enriched_at_status = "enriched"
+    company.enriched_at = now
+    company.enrichment_valid_till = now + timedelta(days=app_settings.ENRICHMENT_TTL_DAYS)
     if domain:
         _upsert_global_row(db, domain, company)
 
@@ -168,15 +231,10 @@ def _apply_scrape(db: Session, company: Company, domain: str | None, result: Scr
     )
 
 
-def enrich_companies(db: Session, companies: list[Company]) -> None:
-    """Enrich a wave of companies: cache-first, then one parallel scrape of the misses.
-
-    Per company, in order: already-enriched rows are untouched; no website -> marked;
-    a fresh global_companies row (cross-campaign cache) is copied at zero cost; the
-    remainder are scraped concurrently against a shared runtime (one httpx pool + one
-    Chromium). Individual failures are non-fatal — those companies continue through
-    qualification with CSV data only. Commits once for the whole wave.
-    """
+def _plan_wave(db: Session, companies: list[Company]) -> list[tuple[Company, str | None]]:
+    """Cache-first pass over a wave: already-enriched rows are untouched; no website ->
+    marked; a fresh global_companies row (cross-campaign cache) is copied at zero cost.
+    Returns the misses that need a live scrape."""
     to_scrape: list[tuple[Company, str | None]] = []
     for company in companies:
         if company.enrichment_profile:
@@ -191,17 +249,20 @@ def enrich_companies(db: Session, companies: list[Company]) -> None:
             if not company.enrichment_content:
                 company.enrichment_content = cached.enrichment_content
             company.enriched_at_status = "enriched"
+            company.enriched_at = cached.enriched_at
+            company.enrichment_valid_till = cached.valid_till
             logger.info("Enrichment cache hit for %s (valid till %s)", domain, cached.valid_till)
             continue
         to_scrape.append((company, domain))
+    return to_scrape
 
-    if to_scrape:
-        try:
-            results = asyncio.run(_scrape_many([company.website for company, _ in to_scrape]))
-        except Exception as exc:  # runtime startup/teardown failure hits the whole wave
-            logger.warning("Enrichment wave failed: %s", exc)
-            results = [exc] * len(to_scrape)
-        for (company, domain), result in zip(to_scrape, results):
-            _apply_scrape(db, company, domain, result)
 
-    db.commit()
+def enrich_companies(db: Session, companies: list[Company]) -> None:
+    """One-shot enrichment of a single wave (runtime started and torn down inline).
+    For multi-wave runs prefer EnrichmentSession, which shares one runtime and lets
+    the caller pipeline scraping against scoring."""
+    session = EnrichmentSession()
+    try:
+        session.finish_wave(db, session.start_wave(db, companies))
+    finally:
+        session.close()

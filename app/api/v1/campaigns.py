@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.api.auth_deps import Forbidden, get_current_user
 from app.api.deps import get_db
-from app.core.exceptions import NotFoundError
+from app.core.exceptions import NotFoundError, ValidationFailedError
 from app.models.campaign import Campaign, CampaignStatus
 from app.models.user import User
 from app.models.website_analysis import AnalysisStatus, WebsiteAnalysis
@@ -57,7 +57,6 @@ def create_campaign(
     campaign = CampaignRepository(db).create(
         Campaign(
             user_id=user.id,
-            organization_id=user.organization_id,
             status=CampaignStatus.ACTIVE,
             website_analysis_id=analysis.id,
         )

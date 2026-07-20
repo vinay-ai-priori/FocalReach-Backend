@@ -2,8 +2,8 @@ from app.core.celery_app import celery_app
 from app.core.logging import configure_logging, get_logger
 from app.db.session import SessionLocal
 from app.models.lead_import import ImportStatus
-from app.repositories.icp_repository import ICPRepository
 from app.repositories.lead_import_repository import LeadImportRepository
+from app.services.campaign_service import active_icp_of
 from app.services.qualification_service import qualify_import
 
 configure_logging()
@@ -18,7 +18,7 @@ def qualify_import_task(lead_import_id: int) -> dict:
         lead_import = import_repo.get(lead_import_id)
         if not lead_import:
             return {"error": "import not found"}
-        icp = ICPRepository(db).get(lead_import.icp_id)
+        icp = active_icp_of(lead_import.campaign)
         import_repo.update(lead_import, status=ImportStatus.QUALIFYING)
         counts = qualify_import(db, lead_import, icp)
         logger.info("Qualification for import %s: %s", lead_import_id, counts)

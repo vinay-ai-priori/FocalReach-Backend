@@ -79,7 +79,7 @@ def draft_batch(
         leads = [
             lead
             for lead in lead_repo.list_for_import(lead_import.id)
-            if lead.tier in (LeadTier.HOT, LeadTier.WARM, LeadTier.NURTURE)
+            if lead.tier in (LeadTier.HOT, LeadTier.WARM, LeadTier.NURTURE, LeadTier.REACTIVATED)
         ]
     leads = [lead for lead in leads if lead.email]
 

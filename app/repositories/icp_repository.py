@@ -7,15 +7,11 @@ from app.repositories.base import BaseRepository
 class ICPRepository(BaseRepository[ICP]):
     model = ICP
 
-    def get_active_for_intelligence(self, company_intelligence_id: int, user_id: int | None = None) -> ICP | None:
-        """ICPs are per-user campaign artifacts: two colleagues get independent ICPs."""
+    def get_active_for_campaign(self, campaign_id: int) -> ICP | None:
+        """ICPs are campaign artifacts — at most one active per campaign (DB-enforced)."""
         stmt = (
             select(ICP)
-            .where(
-                ICP.company_intelligence_id == company_intelligence_id,
-                ICP.is_active.is_(True),
-                ICP.user_id == user_id,
-            )
+            .where(ICP.campaign_id == campaign_id, ICP.is_active.is_(True))
             .order_by(ICP.version.desc())
         )
         return self.db.scalars(stmt).first()

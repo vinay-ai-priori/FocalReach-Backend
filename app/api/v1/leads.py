@@ -11,7 +11,7 @@ from app.models.lead import LeadTier
 from app.models.user import User
 from app.models.lead import Lead
 from app.repositories.lead_repository import LeadRepository
-from app.schemas.lead import LeadOut, LeadTimezoneOut, PrioritizationSummary
+from app.schemas.lead import BulkReactivateRequest, LeadOut, LeadTimezoneOut, PrioritizationSummary
 from app.services.lead_timezone_service import TimezoneResult, resolve_timezone_for_country
 
 router = APIRouter(prefix="/leads", tags=["lead-prioritization"])
@@ -22,6 +22,9 @@ def _lead_out(lead: Lead) -> LeadOut:
     out.company_name = lead.company.name if lead.company else None
     out.lead_import_public_id = lead.lead_import.public_id if lead.lead_import else None
     out.company_public_id = lead.company.public_id if lead.company else None
+    # company_fit is no longer a column — surface it from the persisted breakdown.
+    breakdown = lead.score_breakdown or {}
+    out.company_fit_score = (breakdown.get("company_fit") or {}).get("score")
     return out
 
 
@@ -52,7 +55,35 @@ def summary(
         warm=counts[LeadTier.WARM],
         nurture=counts[LeadTier.NURTURE],
         deprioritized=counts[LeadTier.DEPRIORITIZED],
+        reactivated=counts[LeadTier.REACTIVATED],
     )
+
+
+@router.post("/imports/{import_id}/bulk-reactivate", response_model=PrioritizationSummary)
+def bulk_reactivate(
+    import_id: UUID,
+    payload: BulkReactivateRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> PrioritizationSummary:
+    """Bring a batch of DEPRIORITIZED leads back into outreach. Scores are kept as-is
+    (the numbers are still true) — only the tier flips to REACTIVATED, which makes the
+    leads draft-eligible. Survives later re-scoring runs."""
+    if not payload.lead_ids:
+        raise ValidationFailedError("Select at least one lead to reactivate.")
+    lead_import = get_owned_import(db, import_id, user)
+    lead_repo = LeadRepository(db)
+
+    for lead_id in payload.lead_ids:
+        lead = lead_repo.get_by_public_id(lead_id)
+        if not lead or lead.lead_import_id != lead_import.id:
+            raise NotFoundError(f"Lead {lead_id} is not part of this import.")
+        if lead.tier != LeadTier.DEPRIORITIZED:
+            continue  # only deprioritized leads can be reactivated
+        lead.tier = LeadTier.REACTIVATED
+    db.commit()
+
+    return summary(import_id, user, db)
 
 
 @router.get("/{lead_id}/timezone", response_model=LeadTimezoneOut)

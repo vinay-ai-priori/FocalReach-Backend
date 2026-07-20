@@ -6,8 +6,8 @@ from app.models.campaign import Campaign, CampaignStatus
 from app.models.website_analysis import WebsiteAnalysis
 from app.models.company_intelligence import CompanyIntelligence
 from app.models.icp import ICP
-from app.models.lead_import import LeadImport
-from app.models.company import Company
+from app.models.lead_import import ImportKind, LeadImport, LeadImportRow
+from app.models.company import Company, CompanyQualification, QualificationStatus
 from app.models.global_company import GlobalCompany
 from app.models.lead import Lead
 from app.models.email_draft import DispatchLog, DraftChannel, EmailDraft
@@ -31,7 +31,11 @@ __all__ = [
     "CompanyIntelligence",
     "ICP",
     "LeadImport",
+    "LeadImportRow",
+    "ImportKind",
     "Company",
+    "CompanyQualification",
+    "QualificationStatus",
     "GlobalCompany",
     "Lead",
     "EmailDraft",

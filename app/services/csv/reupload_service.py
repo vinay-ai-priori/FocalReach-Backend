@@ -18,7 +18,7 @@ import json
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from app.models.company import Company, QualificationStatus
+from app.models.company import Company, CompanyQualification, QualificationStatus
 from app.models.email_draft import EmailDraft
 from app.models.icp import ICP
 from app.models.lead import Lead
@@ -137,18 +137,20 @@ def reset_computed_results(db: Session, permanent: LeadImport) -> None:
     lead_ids = select(Lead.id).where(Lead.lead_import_id == permanent.id)
     db.execute(delete(EmailDraft).where(EmailDraft.lead_id.in_(lead_ids)))
 
-    for company in db.scalars(select(Company).where(Company.lead_import_id == permanent.id)):
-        company.qualification_status = QualificationStatus.PENDING
-        company.qualification_checks = None
-        company.qualification_override = False
-        company.industry_match_score = None
-        company.company_fit_score = None
-        company.qualification_reasoning = None
+    for qualification in db.scalars(
+        select(CompanyQualification).where(CompanyQualification.lead_import_id == permanent.id)
+    ):
+        qualification.qualification_status = QualificationStatus.PENDING
+        qualification.qualification_checks = None
+        qualification.qualification_override = False
+        qualification.industry_match_score = None
+        qualification.company_fit_score = None
+        qualification.qualification_reasoning = None
+        qualification.solvable_pain_points = None
 
     for lead in db.scalars(select(Lead).where(Lead.lead_import_id == permanent.id)):
         lead.role_score = None
         lead.signal_score = None
-        lead.company_fit_score = None
         lead.total_score = None
         lead.tier = None
         lead.score_breakdown = None

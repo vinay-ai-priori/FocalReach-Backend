@@ -1,6 +1,6 @@
 import enum
 
-from sqlalchemy import Enum, ForeignKey, Integer, String
+from sqlalchemy import Enum, ForeignKey, Index, Integer, String, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -17,28 +17,37 @@ class ImportStatus(str, enum.Enum):
     FAILED = "failed"
 
 
+class ImportKind(str, enum.Enum):
+    PRIMARY = "primary"  # the campaign's permanent import (at most one per campaign)
+    PENDING_REUPLOAD = "pending_reupload"  # candidate re-upload awaiting confirmation
+
+
 class LeadImport(Base, PublicIDMixin, TimestampMixin):
-    """A single CSV upload with its column mapping and validation report."""
+    """A single CSV upload with its column mapping and validation report.
+
+    Ownership is a single path: lead_import → campaign → user → organization.
+    No duplicated user/org/icp columns — the campaign is the source of truth."""
 
     __tablename__ = "lead_imports"
+    __table_args__ = (
+        # One permanent (PRIMARY) import per campaign, enforced at the DB level; a
+        # campaign can hold any number of PENDING_REUPLOAD candidates over its life.
+        Index(
+            "ux_lead_imports_campaign_primary",
+            "campaign_id",
+            unique=True,
+            postgresql_where=text("kind = 'PRIMARY'"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    icp_id: Mapped[int] = mapped_column(ForeignKey("icps.id", ondelete="CASCADE"), nullable=False, index=True)
-
-    # Ownership: campaigns are private to their creating user; dedup and caching are
-    # scoped to the organization.
-    user_id: Mapped[int | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    campaign_id: Mapped[int] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    organization_id: Mapped[int | None] = mapped_column(
-        ForeignKey("organizations.id", ondelete="SET NULL"), nullable=True, index=True
+    kind: Mapped[ImportKind] = mapped_column(
+        Enum(ImportKind, name="import_kind"), default=ImportKind.PRIMARY, nullable=False
     )
 
-    # Set only on PENDING re-uploads: a candidate dataset awaiting confirmation into the
-    # campaign's permanent import. NULL on the permanent import itself.
-    campaign_id: Mapped[int | None] = mapped_column(
-        ForeignKey("campaigns.id", ondelete="CASCADE"), nullable=True, index=True
-    )
     # Fingerprint of the result-affecting ICP fields at the moment this import last ran.
     # Compared against the current ICP to detect "inputs changed" (stale results / re-run).
     icp_snapshot_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -54,15 +63,34 @@ class LeadImport(Base, PublicIDMixin, TimestampMixin):
     # canonical -> {confidence, source: exact|fuzzy|semantic|manual} for the mapping UI
     mapping_meta: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
     missing_fields: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)  # validation report
-    raw_rows: Mapped[list | None] = mapped_column(JSONB, nullable=True)  # kept until import confirmed
     error_message: Mapped[str | None] = mapped_column(String(1024), nullable=True)
 
     # Stage-2 enrichment progress (qualify_import, gate-passers only). NULL until stage 1
-    # finishes; enrichment_done is bumped once per wave commit. Lets the UI show "N of M
-    # companies enriched" without a live per-company count query.
+    # finishes; enrichment_done is bumped once per wave commit.
     enrichment_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
     enrichment_done: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
-    icp = relationship("ICP", back_populates="lead_imports")
-    companies = relationship("Company", back_populates="lead_import", cascade="all, delete-orphan")
+    campaign = relationship("Campaign", back_populates="lead_imports")
+    rows = relationship("LeadImportRow", back_populates="lead_import", cascade="all, delete-orphan")
+    company_qualifications = relationship(
+        "CompanyQualification", back_populates="lead_import", cascade="all, delete-orphan"
+    )
     leads = relationship("Lead", back_populates="lead_import", cascade="all, delete-orphan")
+
+
+class LeadImportRow(Base, TimestampMixin):
+    """Raw CSV rows staged during column-mapping, one row per line. Kept out of
+    lead_imports so listing imports never loads megabytes of JSONB; purged once the
+    import is confirmed and parsed into companies/leads."""
+
+    __tablename__ = "lead_import_rows"
+    __table_args__ = (UniqueConstraint("lead_import_id", "row_number", name="uq_import_row_number"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    lead_import_id: Mapped[int] = mapped_column(
+        ForeignKey("lead_imports.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    row_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    data: Mapped[dict] = mapped_column(JSONB, nullable=False)
+
+    lead_import = relationship("LeadImport", back_populates="rows")

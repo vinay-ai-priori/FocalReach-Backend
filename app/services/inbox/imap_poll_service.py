@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.crypto import decrypt_secret
 from app.core.logging import get_logger
+from app.models.campaign import Campaign
 from app.models.email_draft import EmailDraft
 from app.models.inbound_reply import InboundReply
 from app.models.lead import Lead
@@ -77,7 +78,8 @@ def _match_lead(db: Session, user_id: int, references: list[str], from_address: 
             select(EmailDraft, Lead)
             .join(Lead, EmailDraft.lead_id == Lead.id)
             .join(LeadImport, Lead.lead_import_id == LeadImport.id)
-            .where(LeadImport.user_id == user_id, EmailDraft.message_id.in_(references))
+            .join(Campaign, LeadImport.campaign_id == Campaign.id)
+            .where(Campaign.user_id == user_id, EmailDraft.message_id.in_(references))
         )
         row = db.execute(stmt).first()
         if row:
@@ -88,7 +90,8 @@ def _match_lead(db: Session, user_id: int, references: list[str], from_address: 
         stmt = (
             select(Lead)
             .join(LeadImport, Lead.lead_import_id == LeadImport.id)
-            .where(LeadImport.user_id == user_id, Lead.email == from_address)
+            .join(Campaign, LeadImport.campaign_id == Campaign.id)
+            .where(Campaign.user_id == user_id, Lead.email == from_address)
         )
         lead = db.scalars(stmt).first()
         if lead:

@@ -26,10 +26,10 @@ class LeadOut(BaseModel):
     time_in_role: str | None = None
     time_at_company: str | None = None
     years_experience: str | None = None
-    industry_score: float | None = None
     role_score: float | None = None
-    fit_score: float | None = None
     signal_score: float | None = None
+    # Derived on read from score_breakdown (no longer a column — single source of truth
+    # is the run's CompanyQualification).
     company_fit_score: float | None = None
     total_score: float | None = None
     tier: LeadTier | None = None
@@ -43,6 +43,11 @@ class PrioritizationSummary(BaseModel):
     warm: int
     nurture: int
     deprioritized: int
+    reactivated: int = 0
+
+
+class BulkReactivateRequest(BaseModel):
+    lead_ids: list[UUID]  # DEPRIORITIZED leads to bring back into outreach
 
 
 class LeadTimezoneOut(BaseModel):

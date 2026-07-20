@@ -22,7 +22,9 @@ class CompanyOut(BaseModel):
     employee_range: str | None = None
     annual_revenue: str | None = None
     revenue_range: str | None = None
-    qualification_status: QualificationStatus
+    # Populated from the run's CompanyQualification row (not attributes of the
+    # canonical Company), so they need defaults for model_validate(company).
+    qualification_status: QualificationStatus = QualificationStatus.PENDING
     qualification_checks: list | None = None
     qualification_override: bool = False
     industry_match_score: float | None = None
@@ -34,9 +36,14 @@ class QualificationDecision(BaseModel):
     status: QualificationStatus  # approved | rejected
 
 
+class BulkApproveRequest(BaseModel):
+    company_ids: list[UUID]  # companies currently in REVIEW to reactivate
+
+
 class QualificationSummary(BaseModel):
     total: int
     approved: int
     rejected: int
     review: int
+    reactivated: int = 0
     pending: int

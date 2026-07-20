@@ -86,7 +86,7 @@ def raise_follow_up_due_task() -> dict:
             ).first()
             if already:
                 continue
-            user_id = lead.lead_import.user_id if lead.lead_import else None
+            user_id = lead.lead_import.campaign.user_id if lead.lead_import else None
             if user_id is None:
                 continue
             try:

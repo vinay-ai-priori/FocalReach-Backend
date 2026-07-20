@@ -381,7 +381,11 @@ def _initial_email_sections(
     """Curated inputs for the initial-email drafter: everything it needs, nothing more."""
     profile = company.enrichment_profile or {}
     person = _matched_person(lead, profile)
-    pains = company.solvable_pain_points or []
+    # Pain points live on this run's qualification verdict, not the canonical company.
+    qualification = next(
+        (q for q in company.qualifications if q.lead_import_id == lead.lead_import_id), None
+    )
+    pains = (qualification.solvable_pain_points if qualification else None) or []
     sections = [
         f"TONE (from ICP): {icp.outreach_tone}",
         f"CAMPAIGN OBJECTIVE: {icp.campaign_objective}",

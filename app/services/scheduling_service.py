@@ -159,6 +159,7 @@ def occupied_slots(
     """Every instant that currently blocks a neighbouring dispatch for this user:
     scheduled/sending drafts' slots plus real sends since `horizon_start`.
     Call while holding the user's advisory lock or the answer may be stale."""
+    from app.models.campaign import Campaign
     from app.models.lead import Lead as LeadModel
     from app.models.lead_import import LeadImport
 
@@ -166,8 +167,9 @@ def occupied_slots(
         select(EmailDraft.scheduled_at, EmailDraft.sent_at, EmailDraft.status)
         .join(LeadModel, EmailDraft.lead_id == LeadModel.id)
         .join(LeadImport, LeadModel.lead_import_id == LeadImport.id)
+        .join(Campaign, LeadImport.campaign_id == Campaign.id)
         .where(
-            LeadImport.user_id == user_id,
+            Campaign.user_id == user_id,
             or_(
                 EmailDraft.status.in_(_SLOT_HOLDING_STATUSES),
                 EmailDraft.sent_at >= horizon_start,

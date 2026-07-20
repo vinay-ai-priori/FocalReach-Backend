@@ -129,7 +129,7 @@ def route_reply(db: Session, inbound_reply: InboundReply) -> None:
         db.commit()
         return
 
-    user_id = lead.lead_import.user_id if lead.lead_import else None
+    user_id = lead.lead_import.campaign.user_id if lead.lead_import else None
     if user_id is None:
         inbound_reply.processed_at = datetime.now(timezone.utc)
         inbound_reply.processing_error = "Lead has no owning user — reply left unrouted."

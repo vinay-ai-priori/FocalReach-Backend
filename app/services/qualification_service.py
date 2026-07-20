@@ -12,7 +12,8 @@ structured AI profile) then concurrent LLM scoring — one call per company retu
   keywords and campaign objective.
 - solvable_pain_points: prospect problems the sender's services can solve.
 Verdict from the average of the two scores:
-> 55 qualified (approved) | 40-55 review | < 40 disqualified (rejected).
+>= 55 qualified (approved) | < 55 needs review. An LLM score can never REJECT —
+rejection is reserved for the deterministic gates (geography / employee size).
 """
 
 import json
@@ -26,18 +27,17 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.logging import get_logger
-from app.models.company import Company, QualificationStatus
+from app.models.company import Company, CompanyQualification, QualificationStatus
 from app.models.company_intelligence import CompanyIntelligence
 from app.models.icp import ICP
 from app.models.lead_import import ImportStatus, LeadImport
 from app.repositories.company_repository import CompanyRepository
 from app.services.ai.openai_client import cached_json_completion
-from app.services.enrichment_service import enrich_companies
+from app.services.enrichment_service import EnrichmentSession
 
 logger = get_logger(__name__)
 
-QUALIFIED_THRESHOLD = 55.0
-REVIEW_THRESHOLD = 40.0
+QUALIFIED_THRESHOLD = 55.0  # average >= this -> approved; below -> needs review
 
 # Names pycountry can't resolve directly: common short names, endonyms, initialism
 # variants. Values must be resolvable by pycountry.countries.lookup().
@@ -284,27 +284,27 @@ def score_company_fit(
 
 
 def _apply_scoring_result(
-    company: Company, checks: list[dict], scoring: tuple | Exception
+    qualification: CompanyQualification, company: Company, checks: list[dict], scoring: tuple | Exception
 ) -> QualificationStatus:
-    """Fold one scoring outcome (or failure) into the company row and its checks."""
+    """Fold one scoring outcome (or failure) into the qualification row and its checks."""
     if isinstance(scoring, Exception):
         logger.warning("LLM qualification scoring failed for %s: %s", company.name, scoring)
         checks.append({"check": "fit_scoring", "result": "unknown", "detail": "AI scoring failed — routed to review."})
         return QualificationStatus.REVIEW
 
     industry_score, fit_score, reasoning, pain_points = scoring
-    company.industry_match_score = industry_score
-    company.company_fit_score = fit_score
-    company.qualification_reasoning = reasoning
-    company.solvable_pain_points = pain_points or None
+    qualification.industry_match_score = industry_score
+    qualification.company_fit_score = fit_score
+    qualification.qualification_reasoning = reasoning
+    qualification.solvable_pain_points = pain_points or None
 
     average = round((industry_score + fit_score) / 2, 1)
-    if average > QUALIFIED_THRESHOLD:
+    if average >= QUALIFIED_THRESHOLD:
         status, result = QualificationStatus.APPROVED, "pass"
-    elif average >= REVIEW_THRESHOLD:
-        status, result = QualificationStatus.REVIEW, "unknown"
     else:
-        status, result = QualificationStatus.REJECTED, "fail"
+        # Low LLM scores never reject — only the deterministic gates can. The user
+        # decides review companies via the bulk "Approve companies" action.
+        status, result = QualificationStatus.REVIEW, "unknown"
 
     checks.append({
         "check": "industry_match",
@@ -322,7 +322,7 @@ def _apply_scoring_result(
 # Big per-company payloads (crawled website text, AI profile, check details). The session
 # runs with expire_on_commit=False, so once committed these would otherwise sit in RAM for
 # the whole task — expire them right after their wave commits so the memory is reclaimed.
-_HEAVY_COMPANY_FIELDS = ["enrichment_content", "enrichment_profile", "qualification_checks"]
+_HEAVY_COMPANY_FIELDS = ["enrichment_content", "enrichment_profile"]
 
 
 def qualify_import(db: Session, lead_import: LeadImport, icp: ICP) -> dict:
@@ -344,58 +344,87 @@ def qualify_import(db: Session, lead_import: LeadImport, icp: ICP) -> dict:
     counts = {"approved": 0, "rejected": 0, "review": 0}
 
     # ---- Stage 1: gates ----
-    gate_passed: list[tuple[Company, list[dict]]] = []
-    for company in repo.list_for_import(lead_import.id):
+    gate_passed: list[tuple[CompanyQualification, Company, list[dict]]] = []
+    for qualification, company in repo.list_for_import(lead_import.id):
         # Skip human decisions AND companies already qualified in a previous run of this
         # import (append mode: only new companies enter the pipeline). A re-run clears
         # qualification_checks/override first, so those are re-processed here.
-        if company.qualification_override or company.qualification_checks is not None:
-            counts[company.qualification_status.value] = counts.get(company.qualification_status.value, 0) + 1
+        if qualification.qualification_override or qualification.qualification_checks is not None:
+            counts[qualification.qualification_status.value] = (
+                counts.get(qualification.qualification_status.value, 0) + 1
+            )
             continue
         checks = [check_geography(company, icp), check_employee_size(company, icp)]
         gate_results = {c["result"] for c in checks}
         if "fail" in gate_results:
-            company.qualification_status = QualificationStatus.REJECTED
-            company.qualification_checks = checks
+            qualification.qualification_status = QualificationStatus.REJECTED
+            qualification.qualification_checks = checks
             counts["rejected"] += 1
         elif "unknown" in gate_results:
-            company.qualification_status = QualificationStatus.REVIEW
-            company.qualification_checks = checks
+            qualification.qualification_status = QualificationStatus.REVIEW
+            qualification.qualification_checks = checks
             counts["review"] += 1
         else:
             # No checks written yet: a crash before stage 2 leaves these unmarked, so a
             # re-run re-gates them (cheap) instead of skipping them as already done.
-            gate_passed.append((company, checks))
+            gate_passed.append((qualification, company, checks))
     lead_import.enrichment_total = len(gate_passed)
     lead_import.enrichment_done = 0
     db.commit()  # every gate verdict lands at once, plus the enrichment denominator
 
-    # ---- Stage 2: enrichment + LLM ranking, one wave at a time ----
+    # ---- Stage 2: enrichment + LLM ranking, pipelined waves ----
+    # One EnrichmentSession = one shared scraper runtime (httpx pool + Chromium) for
+    # the whole import. The loop below overlaps the stages: while wave N's LLM scoring
+    # runs on this thread, wave N+1's scrape is already in flight on the session's
+    # background thread — so scoring time is hidden behind scraping for every wave
+    # except the last. All DB access stays on this thread.
     parallelism = max(1, settings.QUALIFY_PARALLELISM)
-    for start in range(0, len(gate_passed), parallelism):
-        wave = gate_passed[start:start + parallelism]
-        enrich_companies(db, [company for company, _ in wave])
-
-        with ThreadPoolExecutor(max_workers=parallelism) as pool:
-            futures = [pool.submit(score_company_fit, company, icp, intelligence) for company, _ in wave]
-            outcomes = []
-            for future in futures:
-                try:
-                    outcomes.append(future.result())
-                except Exception as exc:
-                    outcomes.append(exc)
-
-        for (company, checks), outcome in zip(wave, outcomes):
-            status = _apply_scoring_result(company, checks, outcome)
-            company.qualification_status = status
-            company.qualification_checks = checks
-            counts[status.value] += 1
-
-        lead_import.enrichment_done += len(wave)
-        db.commit()  # per-wave commit: progress survives worker restarts
-        for company, _ in wave:
-            db.expire(company, _HEAVY_COMPANY_FIELDS)
+    waves = [gate_passed[i:i + parallelism] for i in range(0, len(gate_passed), parallelism)]
+    if waves:
+        session = EnrichmentSession()
+        try:
+            previous: list | None = None
+            for wave in waves:
+                enrichment = session.start_wave(db, [company for _, company, _ in wave])
+                if previous is not None:
+                    _score_wave(db, previous, icp, intelligence, counts, lead_import, parallelism)
+                session.finish_wave(db, enrichment)
+                previous = wave
+            _score_wave(db, previous, icp, intelligence, counts, lead_import, parallelism)
+        finally:
+            session.close()
 
     lead_import.status = ImportStatus.QUALIFIED
     db.commit()
     return counts
+
+
+def _score_wave(
+    db: Session,
+    wave: list[tuple[CompanyQualification, Company, list[dict]]],
+    icp: ICP,
+    intelligence: CompanyIntelligence | None,
+    counts: dict,
+    lead_import: LeadImport,
+    parallelism: int,
+) -> None:
+    """LLM-score one enriched wave and commit its verdicts (caller's thread only)."""
+    with ThreadPoolExecutor(max_workers=parallelism) as pool:
+        futures = [pool.submit(score_company_fit, company, icp, intelligence) for _, company, _ in wave]
+        outcomes = []
+        for future in futures:
+            try:
+                outcomes.append(future.result())
+            except Exception as exc:
+                outcomes.append(exc)
+
+    for (qualification, company, checks), outcome in zip(wave, outcomes):
+        status = _apply_scoring_result(qualification, company, checks, outcome)
+        qualification.qualification_status = status
+        qualification.qualification_checks = checks
+        counts[status.value] += 1
+
+    lead_import.enrichment_done += len(wave)
+    db.commit()  # per-wave commit: progress survives worker restarts
+    for _, company, _ in wave:
+        db.expire(company, _HEAVY_COMPANY_FIELDS)

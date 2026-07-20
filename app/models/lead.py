@@ -1,6 +1,6 @@
 import enum
 
-from sqlalchemy import Enum, Float, ForeignKey, Integer, String
+from sqlalchemy import Enum, Float, ForeignKey, Index, Integer, String, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -11,19 +11,34 @@ class LeadTier(str, enum.Enum):
     HOT = "hot"
     WARM = "warm"
     NURTURE = "nurture"
-    DEPRIORITIZED = "deprioritized"
+    DEPRIORITIZED = "deprioritized"  # total score < 25 — excluded from outreach by default
+    REACTIVATED = "reactivated"  # manually brought back from DEPRIORITIZED; outreach-eligible
 
 
 class Lead(Base, PublicIDMixin, TimestampMixin):
     """An individual prospect from the CSV, scored deterministically against the ICP."""
 
     __tablename__ = "leads"
+    __table_args__ = (
+        # No duplicate contact within one import run (case-insensitive on email).
+        Index(
+            "ux_leads_import_email",
+            "lead_import_id",
+            text("lower(email)"),
+            unique=True,
+            postgresql_where=text("email IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     lead_import_id: Mapped[int] = mapped_column(
         ForeignKey("lead_imports.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    company_id: Mapped[int] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"), nullable=False, index=True)
+    # RESTRICT: canonical companies are shared across runs — deleting one must never
+    # silently take leads with it; imports cascade leads instead.
+    company_id: Mapped[int] = mapped_column(
+        ForeignKey("companies.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
 
     first_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     last_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -58,13 +73,11 @@ class Lead(Base, PublicIDMixin, TimestampMixin):
 
     # Scoring per the Role Score & Signal Score logic document:
     # role_score 0-30 (title tier + size modifier), signal_score 0-25 (tenure + experience),
-    # company_fit_score 0-30 (inherited from company qualification), total_score 0-85.
-    # industry_score/fit_score are legacy columns from the old 0-100 scheme, kept for data.
-    industry_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # total_score 0-85 (includes the company-fit contribution, which is read from the
+    # run's CompanyQualification via join — not copied here). Full breakdown in
+    # score_breakdown for the UI.
     role_score: Mapped[float | None] = mapped_column(Float, nullable=True)
-    fit_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     signal_score: Mapped[float | None] = mapped_column(Float, nullable=True)
-    company_fit_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     total_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     tier: Mapped[LeadTier | None] = mapped_column(Enum(LeadTier, name="lead_tier"), nullable=True)
     score_breakdown: Mapped[dict | None] = mapped_column(JSONB, nullable=True)

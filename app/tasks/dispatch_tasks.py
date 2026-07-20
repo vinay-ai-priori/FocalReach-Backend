@@ -125,7 +125,7 @@ def _dispatch_one(db, draft: EmailDraft) -> bool:
         _release_to_ready(db, draft, "skipped_empty", "Skipped: the draft has no subject/body.")
         return False
 
-    user_id = lead.lead_import.user_id if lead.lead_import else None
+    user_id = lead.lead_import.campaign.user_id if lead.lead_import else None
     mailbox = None
     if user_id:
         mailboxes = MailboxConnectionRepository(db).list_for_user(user_id)
@@ -256,7 +256,7 @@ def sweep_stuck_dispatches() -> dict:
 def _resolve_stuck_draft(db, draft: EmailDraft) -> str:
     """Resolves one stuck SENDING draft; returns which counter to bump."""
     lead = draft.lead
-    user_id = lead.lead_import.user_id if lead and lead.lead_import else None
+    user_id = lead.lead_import.campaign.user_id if lead and lead.lead_import else None
 
     verification = SentVerification.UNKNOWN
     if user_id and draft.message_id:

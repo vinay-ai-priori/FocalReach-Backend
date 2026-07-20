@@ -10,7 +10,7 @@ from app.api.ownership import get_owned_import
 from app.models.user import User
 from app.repositories.campaign_repository import CampaignRepository
 from app.core.exceptions import NotFoundError, ValidationFailedError
-from app.models.lead_import import ImportStatus
+from app.models.lead_import import ImportKind, ImportStatus
 from app.repositories.icp_repository import ICPRepository
 from app.repositories.lead_import_repository import LeadImportRepository
 from app.schemas.common import TaskAccepted
@@ -24,11 +24,13 @@ from app.schemas.lead_import import (
 )
 from app.services.csv.field_definitions import FIELD_DEFINITIONS
 from app.services.csv.dedup_service import compute_dedup_stats
+from app.services.campaign_service import active_icp_of, primary_import_of
 from app.services.csv.import_service import (
     compute_stats,
     confirm_import,
     confirm_reupload,
     parse_and_validate,
+    raw_rows_of,
     update_mapping,
 )
 from app.services.csv.reupload_service import resolve_upload_mode
@@ -63,25 +65,21 @@ def _read_capped(file: UploadFile) -> bytes:
 
 def _lead_import_out(lead_import) -> LeadImportOut:
     out = LeadImportOut.model_validate(lead_import)
-    out.icp_public_id = lead_import.icp.public_id if lead_import.icp else None
+    icp = active_icp_of(lead_import.campaign)
+    out.icp_public_id = icp.public_id if icp else None
     return out
 
 
-def _resolve_reupload(db: Session, lead_import) -> dict:
+def _resolve_reupload(db: Session, lead_import, rows: list[dict]) -> dict:
     """Mode/counts for a pending re-upload, recomputed from the CURRENT mapping so the
     verdict refreshes whenever the user remaps a column."""
-    if lead_import.campaign_id is None:
+    if lead_import.kind != ImportKind.PENDING_REUPLOAD:
         return {}
-    campaign = CampaignRepository(db).get(lead_import.campaign_id)
-    if not campaign or not campaign.lead_import_id:
-        return {}
-    permanent = LeadImportRepository(db).get(campaign.lead_import_id)
-    icp = ICPRepository(db).get(lead_import.icp_id)
+    permanent = primary_import_of(lead_import.campaign)
+    icp = active_icp_of(lead_import.campaign)
     if not permanent or not icp:
         return {}
-    resolution = resolve_upload_mode(
-        db, permanent, icp, lead_import.raw_rows or [], lead_import.column_mapping or {}
-    )
+    resolution = resolve_upload_mode(db, permanent, icp, rows, lead_import.column_mapping or {})
     return {
         "upload_mode": resolution["mode"],
         "inputs_changed": resolution["inputs_changed"],
@@ -91,6 +89,9 @@ def _resolve_reupload(db: Session, lead_import) -> dict:
 
 
 def _validation_out(db: Session, lead_import) -> ImportValidationOut:
+    # The staged raw payload is large — fetch it from the DB exactly once per request
+    # and share it across stats, dedup, sample rows, and re-upload resolution.
+    rows = raw_rows_of(db, lead_import)
     meta = lead_import.mapping_meta or {}
     field_mappings = [
         FieldMapping(
@@ -112,9 +113,11 @@ def _validation_out(db: Session, lead_import) -> ImportValidationOut:
         lead_import=_lead_import_out(lead_import),
         field_mappings=field_mappings,
         missing_fields=[MissingFieldWarning(**m) for m in lead_import.missing_fields],
-        sample_rows=(lead_import.raw_rows or [])[:5],
-        stats=ImportStats(**compute_stats(lead_import), **compute_dedup_stats(db, lead_import)),
-        **_resolve_reupload(db, lead_import),
+        sample_rows=rows[:5],
+        stats=ImportStats(
+            **compute_stats(db, lead_import, rows), **compute_dedup_stats(db, lead_import, rows)
+        ),
+        **_resolve_reupload(db, lead_import, rows),
     )
 
 
@@ -143,42 +146,38 @@ def upload_csv(
     if not icp:
         raise NotFoundError(f"ICP {icp_id} not found.")
 
+    # v2: every import belongs to a campaign — resolve it from the ICP when the client
+    # doesn't send one (the ICP is itself a campaign artifact).
     campaign = CampaignRepository(db).get_by_public_id(campaign_id) if campaign_id else None
-    if campaign and campaign.user_id != user.id:
-        campaign = None
+    if campaign is None:
+        campaign = icp.campaign
+    if campaign is None or campaign.user_id != user.id:
+        raise NotFoundError("Campaign not found for this ICP.")
 
-    permanent = None
-    if campaign and campaign.lead_import_id:
-        permanent = LeadImportRepository(db).get(campaign.lead_import_id)
-        if permanent and permanent.status == ImportStatus.MAPPING:
-            # Previous upload was never confirmed — replace it instead of re-uploading into it.
-            permanent = None
+    permanent = primary_import_of(campaign)
+    if permanent is not None and permanent.status == ImportStatus.MAPPING:
+        # Previous upload was never confirmed — replace it instead of re-uploading into it.
+        permanent = None
 
-    if permanent is not None:
-        # One run at a time: no re-upload while the pipeline is processing.
-        if permanent.status in (ImportStatus.IMPORTED, ImportStatus.QUALIFYING, ImportStatus.SCORING):
-            raise ValidationFailedError(
-                "This campaign's pipeline is still running. Wait for it to finish before uploading again."
-            )
-        # Discard any earlier pending upload the user abandoned without confirming.
-        from app.models.lead_import import LeadImport as LeadImportModel
-
-        for stale in db.query(LeadImportModel).filter(
-            LeadImportModel.campaign_id == campaign.id, LeadImportModel.status == ImportStatus.MAPPING
-        ):
-            db.delete(stale)
-        db.commit()
-        # Pending re-upload: campaign keeps pointing at its permanent import until confirm.
-        lead_import = parse_and_validate(
-            db, icp, file.filename, file_bytes,
-            user_id=user.id, organization_id=user.organization_id, campaign_id=campaign.id,
+    # One run at a time: no re-upload while the pipeline is processing.
+    if permanent is not None and permanent.status in (
+        ImportStatus.IMPORTED, ImportStatus.QUALIFYING, ImportStatus.SCORING
+    ):
+        raise ValidationFailedError(
+            "This campaign's pipeline is still running. Wait for it to finish before uploading again."
         )
-    else:
-        lead_import = parse_and_validate(
-            db, icp, file.filename, file_bytes, user_id=user.id, organization_id=user.organization_id
-        )
-        if campaign:
-            CampaignRepository(db).update(campaign, lead_import_id=lead_import.id)
+
+    # Discard any earlier upload the user abandoned without confirming (any kind).
+    from app.models.lead_import import LeadImport as LeadImportModel
+
+    for stale in db.query(LeadImportModel).filter(
+        LeadImportModel.campaign_id == campaign.id, LeadImportModel.status == ImportStatus.MAPPING
+    ):
+        db.delete(stale)
+    db.commit()
+
+    kind = ImportKind.PENDING_REUPLOAD if permanent is not None else ImportKind.PRIMARY
+    lead_import = parse_and_validate(db, campaign, file.filename, file_bytes, kind=kind)
     return _validation_out(db, lead_import)
 
 
@@ -228,11 +227,10 @@ def confirm(import_id: UUID, user: User = Depends(get_current_user), db: Session
     """User acknowledged the validation report: materialize rows, then qualify companies via Celery."""
     lead_import = get_owned_import(db, import_id, user)
 
-    if lead_import.campaign_id is not None:
+    if lead_import.kind == ImportKind.PENDING_REUPLOAD:
         # Pending re-upload: merge into the campaign's permanent import (append/rerun; mode
         # is re-resolved server-side — blocked uploads are rejected here too).
-        campaign = CampaignRepository(db).get(lead_import.campaign_id)
-        permanent = LeadImportRepository(db).get(campaign.lead_import_id) if campaign else None
+        permanent = primary_import_of(lead_import.campaign)
         if not permanent:
             raise ValidationFailedError("The campaign this upload belongs to no longer has an active import.")
         permanent, _mode = confirm_reupload(db, lead_import, permanent)

@@ -18,9 +18,11 @@ import time
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.models.campaign import Campaign
 from app.models.company import Company
 from app.models.lead import Lead, LeadTier
-from app.models.lead_import import LeadImport
+from app.models.lead_import import ImportKind, LeadImport
+from app.models.user import User
 from app.services.website.url_validator import extract_domain
 
 _LEGAL_SUFFIXES = (
@@ -110,16 +112,20 @@ def build_dedup_index(
     """`exclude_import_ids` must contain the import being validated AND the campaign's own
     permanent import (when re-uploading) — a campaign must never dedup against itself."""
     index = DedupIndex()
-    if organization_id is None:
-        return index
     if isinstance(exclude_import_ids, int):
         exclude_import_ids = {exclude_import_ids}
     excluded = {i for i in (exclude_import_ids or set()) if i is not None}
+    # NULL organization = the super admin's own space; dedup still applies within it.
+    org_filter = (
+        User.organization_id.is_(None) if organization_id is None else User.organization_id == organization_id
+    )
     stmt = (
         select(Lead, Company)
         .join(Company, Lead.company_id == Company.id)
         .join(LeadImport, Lead.lead_import_id == LeadImport.id)
-        .where(LeadImport.organization_id == organization_id, Lead.is_duplicate.is_(False))
+        .join(Campaign, LeadImport.campaign_id == Campaign.id)
+        .join(User, Campaign.user_id == User.id)
+        .where(org_filter, Lead.is_duplicate.is_(False))
     )
     if excluded:
         stmt = stmt.where(LeadImport.id.not_in(excluded))
@@ -152,22 +158,28 @@ def _cached_dedup_index(db: Session, organization_id: int | None, excluded: set[
     return index
 
 
-def compute_dedup_stats(db: Session, lead_import: LeadImport) -> dict:
+def compute_dedup_stats(db: Session, lead_import: LeadImport, rows: list[dict] | None = None) -> dict:
     """Analysis for the upload page, computed from the raw rows vs the organization's existing leads.
     Only rows that would actually be imported (see classify_row) are considered."""
     from app.services.csv.import_service import classify_row
 
-    excluded = {lead_import.id}
-    if lead_import.campaign_id is not None:
-        # Pending re-upload: also exclude the campaign's own permanent import.
-        from app.models.campaign import Campaign
+    from app.services.csv.import_service import organization_id_of, raw_rows_of
 
-        campaign = db.get(Campaign, lead_import.campaign_id)
-        if campaign and campaign.lead_import_id:
-            excluded.add(campaign.lead_import_id)
-    index = _cached_dedup_index(db, lead_import.organization_id, excluded)
+    excluded = {lead_import.id}
+    if lead_import.kind == ImportKind.PENDING_REUPLOAD:
+        # Pending re-upload: also exclude the campaign's own permanent import.
+        permanent = db.scalars(
+            select(LeadImport).where(
+                LeadImport.campaign_id == lead_import.campaign_id,
+                LeadImport.kind == ImportKind.PRIMARY,
+            )
+        ).first()
+        if permanent:
+            excluded.add(permanent.id)
+    index = _cached_dedup_index(db, organization_id_of(lead_import), excluded)
     mapping = lead_import.column_mapping or {}
-    rows = lead_import.raw_rows or []
+    if rows is None:
+        rows = raw_rows_of(db, lead_import)
 
     def cell(row: dict, key: str) -> str:
         col = mapping.get(key)

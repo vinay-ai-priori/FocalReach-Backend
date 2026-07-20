@@ -1,4 +1,6 @@
-"""Ownership checks: campaigns are private to their creating user, for every role."""
+"""Ownership checks: campaigns are private to their creating user, for every role.
+
+v2 schema: ownership is derived through the single path import → campaign → user."""
 
 from uuid import UUID
 
@@ -15,11 +17,10 @@ def get_owned_import(db: Session, import_public_id: UUID, user: User) -> LeadImp
     lead_import = LeadImportRepository(db).get_by_public_id(import_public_id)
     if not lead_import:
         raise NotFoundError(f"Import {import_public_id} not found.")
-    if lead_import.user_id is not None and lead_import.user_id != user.id:
-        raise Forbidden("This campaign belongs to another user.")
+    assert_import_owned(lead_import, user)
     return lead_import
 
 
 def assert_import_owned(lead_import: LeadImport | None, user: User) -> None:
-    if lead_import and lead_import.user_id is not None and lead_import.user_id != user.id:
+    if lead_import and lead_import.campaign.user_id != user.id:
         raise Forbidden("This campaign belongs to another user.")

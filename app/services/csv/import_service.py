@@ -1,17 +1,23 @@
-"""Lead file (CSV/XLSX) parsing, validation, and confirmed import into companies + leads."""
+"""Lead file (CSV/XLSX) parsing, validation, and confirmed import into companies + leads.
+
+v2 schema: ownership is a single path (lead_import → campaign → user → org). Companies
+are canonical per (organization, domain/name) and upserted — never duplicated per run;
+per-run verdicts live in CompanyQualification. Raw rows are staged in lead_import_rows
+and purged on confirm."""
 
 import csv
 import io
 import re
 
+from sqlalchemy import insert, select
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import ValidationFailedError
 from app.core.logging import get_logger
-from app.models.company import Company
-from app.models.icp import ICP
+from app.models.campaign import Campaign
+from app.models.company import Company, CompanyQualification
 from app.models.lead import Lead
-from app.models.lead_import import ImportStatus, LeadImport
+from app.models.lead_import import ImportKind, ImportStatus, LeadImport, LeadImportRow
 from app.repositories.lead_import_repository import LeadImportRepository
 from app.services.csv.column_matcher import build_missing_field_report, match_columns
 from app.services.csv.dedup_service import build_dedup_index
@@ -75,14 +81,29 @@ def _parse_xlsx(file_bytes: bytes) -> tuple[list[str], list[dict]]:
         workbook.close()
 
 
+def organization_id_of(lead_import: LeadImport) -> int | None:
+    """The single ownership path: import → campaign → user → organization.
+    None = the super admin's own space (they sit outside every organization)."""
+    return lead_import.campaign.user.organization_id
+
+
+def raw_rows_of(db: Session, lead_import: LeadImport) -> list[dict]:
+    """Staged raw rows, in file order. Empty once the import is confirmed (purged)."""
+    return list(
+        db.scalars(
+            select(LeadImportRow.data)
+            .where(LeadImportRow.lead_import_id == lead_import.id)
+            .order_by(LeadImportRow.row_number)
+        )
+    )
+
+
 def parse_and_validate(
     db: Session,
-    icp: ICP,
+    campaign: Campaign,
     filename: str,
     file_bytes: bytes,
-    user_id: int | None = None,
-    organization_id: int | None = None,
-    campaign_id: int | None = None,  # set only for PENDING re-uploads into an existing run
+    kind: ImportKind = ImportKind.PRIMARY,
 ) -> LeadImport:
     if (filename or "").lower().endswith(".xlsx"):
         columns, rows = _parse_xlsx(file_bytes)
@@ -106,10 +127,8 @@ def parse_and_validate(
     missing = build_missing_field_report(matching)
 
     lead_import = LeadImport(
-        icp_id=icp.id,
-        user_id=user_id,
-        organization_id=organization_id,
-        campaign_id=campaign_id,
+        campaign_id=campaign.id,
+        kind=kind,
         filename=filename,
         status=ImportStatus.MAPPING,
         total_rows=len(rows),
@@ -117,15 +136,24 @@ def parse_and_validate(
         column_mapping=column_mapping,
         mapping_meta=mapping_meta,
         missing_fields=missing,
-        raw_rows=rows,
     )
-    return LeadImportRepository(db).create(lead_import)
+    lead_import = LeadImportRepository(db).create(lead_import)
+    # Core bulk insert (insertmanyvalues): batches thousands of rows into a handful of
+    # round trips — the ORM add_all path costs one round trip per row against a remote DB.
+    db.execute(
+        insert(LeadImportRow),
+        [{"lead_import_id": lead_import.id, "row_number": i, "data": row} for i, row in enumerate(rows)],
+    )
+    db.commit()
+    return lead_import
 
 
-def compute_stats(lead_import: LeadImport) -> dict:
+def compute_stats(db: Session, lead_import: LeadImport, rows: list[dict] | None = None) -> dict:
     """CSV analytics for the validation page, computed from the current column mapping so
-    they refresh whenever the user remaps a column. Uses the raw rows still held pre-confirm."""
-    rows = lead_import.raw_rows or []
+    they refresh whenever the user remaps a column. Pass `rows` when the caller already
+    fetched them — the staged payload is large and re-fetching it is a full round trip."""
+    if rows is None:
+        rows = raw_rows_of(db, lead_import)
     mapping = lead_import.column_mapping or {}
 
     companies: set[str] = set()
@@ -205,6 +233,54 @@ def classify_row(row: dict, mapping: dict) -> str:
     return "keep"
 
 
+def _company_key(name: str, domain: str | None) -> str:
+    """Canonical identity within an org: domain when present, else normalized name."""
+    return domain.lower() if domain else f"name:{name.lower()}"
+
+
+def _upsert_company(
+    db: Session,
+    organization_id: int | None,
+    row: dict,
+    mapping: dict,
+    company_name: str,
+    website: str | None,
+    domain: str | None,
+) -> Company:
+    """Find-or-create the canonical company for this org; refresh firmographics from
+    the CSV on hit (newer upload wins for CSV-sourced fields, enrichment untouched)."""
+    stmt = select(Company).where(
+        Company.organization_id.is_(None) if organization_id is None else Company.organization_id == organization_id
+    )
+    stmt = stmt.where(Company.domain == domain) if domain else stmt.where(
+        Company.domain.is_(None), Company.name.ilike(company_name)
+    )
+    company = db.scalars(stmt).first()
+    firmographics = dict(
+        name=company_name,
+        website=website,
+        domain=domain,
+        industry=_get(row, mapping, "company_industry"),
+        description=_get(row, mapping, "company_description"),
+        city=_get(row, mapping, "company_city"),
+        state=_get(row, mapping, "company_state"),
+        country=_get(row, mapping, "company_country"),
+        employee_count=_parse_int(_get(row, mapping, "company_employee_count")),
+        employee_range=_get(row, mapping, "company_employee_range"),
+        annual_revenue=_get(row, mapping, "company_revenue"),
+        linkedin_url=_get(row, mapping, "company_linkedin"),
+    )
+    if company is None:
+        company = Company(organization_id=organization_id, **firmographics)
+        db.add(company)
+        db.flush()
+    else:
+        for field, value in firmographics.items():
+            if value is not None:
+                setattr(company, field, value)
+    return company
+
+
 def _materialize_rows(
     db: Session,
     target_import: LeadImport,
@@ -214,11 +290,16 @@ def _materialize_rows(
     companies_by_key: dict[str, Company],
     skip_identity=None,  # CampaignIdentityIndex | None — skip rows already in the campaign
 ) -> tuple[int, int, int]:
-    """Turn raw rows into Company/Lead records on `target_import`.
-    Returns (created_leads, dropped, cross_campaign_duplicates)."""
+    """Turn raw rows into canonical Company + CompanyQualification + Lead records on
+    `target_import`. Returns (created_leads, dropped, cross_campaign_duplicates)."""
+    organization_id = organization_id_of(target_import)
     leads: list[Lead] = []
     dropped = 0
     duplicates = 0
+    seen_emails: set[str] = set()
+    qualified_company_ids: set[int] = {
+        q.company_id for q in target_import.company_qualifications
+    }
 
     for row in rows:
         # Drop rows we can't identify or contact (missing company name, name, or email).
@@ -237,31 +318,24 @@ def _materialize_rows(
         full_name = _get(row, mapping, "full_name")
         email = _get(row, mapping, "email")
 
+        # In-file duplicate contact (DB also enforces via ux_leads_import_email).
+        if email.lower() in seen_emails:
+            dropped += 1
+            continue
+
         # Row-level identity: skip contacts already present in this campaign (re-upload).
         if skip_identity is not None and skip_identity.lead_exists(company_name, domain, email, full_name):
             continue
+        seen_emails.add(email.lower())
 
-        company_key = company_name.lower()
-        company = companies_by_key.get(company_key)
+        key = _company_key(company_name, domain)
+        company = companies_by_key.get(key)
         if company is None:
-            company = Company(
-                lead_import_id=target_import.id,
-                name=company_name,
-                website=website,
-                domain=domain,
-                industry=_get(row, mapping, "company_industry"),
-                description=_get(row, mapping, "company_description"),
-                city=_get(row, mapping, "company_city"),
-                state=_get(row, mapping, "company_state"),
-                country=_get(row, mapping, "company_country"),
-                employee_count=_parse_int(_get(row, mapping, "company_employee_count")),
-                employee_range=_get(row, mapping, "company_employee_range"),
-                annual_revenue=_get(row, mapping, "company_revenue"),
-                linkedin_url=_get(row, mapping, "company_linkedin"),
-            )
-            companies_by_key[company_key] = company
-            db.add(company)
-            db.flush()
+            company = _upsert_company(db, organization_id, row, mapping, company_name, website, domain)
+            companies_by_key[key] = company
+        if company.id not in qualified_company_ids:
+            db.add(CompanyQualification(lead_import_id=target_import.id, company_id=company.id))
+            qualified_company_ids.add(company.id)
 
         # We only collect Full Name; derive first/last from it for greetings & personalization.
         name_parts = full_name.split()
@@ -298,8 +372,14 @@ def _materialize_rows(
     return len(leads), dropped, duplicates
 
 
+def _purge_raw_rows(db: Session, lead_import: LeadImport) -> None:
+    db.query(LeadImportRow).filter(LeadImportRow.lead_import_id == lead_import.id).delete(
+        synchronize_session=False
+    )
+
+
 def confirm_import(db: Session, lead_import: LeadImport) -> LeadImport:
-    """Materialize raw rows into Company and Lead records, deduplicating companies."""
+    """Materialize staged rows into canonical Company + Lead records."""
     from app.services.csv.reupload_service import icp_fingerprint
 
     if lead_import.status != ImportStatus.MAPPING:
@@ -308,18 +388,22 @@ def confirm_import(db: Session, lead_import: LeadImport) -> LeadImport:
     if not mapping.get("company_name"):
         raise ValidationFailedError("A Company Name column must be mapped before import.")
 
+    organization_id = organization_id_of(lead_import)
+    rows = raw_rows_of(db, lead_import)
+
     # Cross-campaign dedup index for the organization's OTHER campaigns (built once).
-    dedup_index = build_dedup_index(db, lead_import.organization_id, {lead_import.id})
+    dedup_index = build_dedup_index(db, organization_id, {lead_import.id})
 
     companies_by_key: dict[str, Company] = {}
     created, dropped, duplicates = _materialize_rows(
-        db, lead_import, lead_import.raw_rows or [], mapping, dedup_index, companies_by_key
+        db, lead_import, rows, mapping, dedup_index, companies_by_key
     )
 
     lead_import.status = ImportStatus.IMPORTED
-    lead_import.raw_rows = None  # drop the raw payload once materialized
-    if lead_import.icp:
-        lead_import.icp_snapshot_hash = icp_fingerprint(lead_import.icp)
+    _purge_raw_rows(db, lead_import)  # drop the staged payload once materialized
+    active_icp = next((i for i in lead_import.campaign.icps if i.is_active), None)
+    if active_icp:
+        lead_import.icp_snapshot_hash = icp_fingerprint(active_icp)
     db.commit()
     db.refresh(lead_import)
     logger.info(
@@ -347,8 +431,9 @@ def confirm_reupload(db: Session, pending: LeadImport, permanent: LeadImport) ->
     if not mapping.get("company_name"):
         raise ValidationFailedError("A Company Name column must be mapped before import.")
 
-    icp = pending.icp
-    resolution = resolve_upload_mode(db, permanent, icp, pending.raw_rows or [], mapping)
+    icp = next((i for i in permanent.campaign.icps if i.is_active), None)
+    pending_rows = raw_rows_of(db, pending)
+    resolution = resolve_upload_mode(db, permanent, icp, pending_rows, mapping)
     mode = resolution["mode"]
     if mode == "blocked":
         raise ValidationFailedError(
@@ -356,26 +441,30 @@ def confirm_reupload(db: Session, pending: LeadImport, permanent: LeadImport) ->
         )
 
     if mode == "rerun":
-        # Entities are kept; every computed artifact (qualification, scores, drafts,
-        # manual decisions) is erased and the whole set re-runs against the new inputs.
+        # Entities are kept; every computed artifact (qualification scores, lead scores,
+        # drafts, manual decisions) is erased and the whole set re-runs against new inputs.
         reset_computed_results(db, permanent)
 
     # Row-level identity skip + campaign-aware dedup (never dedup against itself).
+    organization_id = organization_id_of(permanent)
     identity = CampaignIdentityIndex.build(db, permanent.id)
-    dedup_index = build_dedup_index(db, permanent.organization_id, {pending.id, permanent.id})
+    dedup_index = build_dedup_index(db, organization_id, {pending.id, permanent.id})
 
-    # Seed with the campaign's existing companies so new leads at known companies attach
-    # to the existing Company row instead of creating a duplicate.
-    from sqlalchemy import select
-
-    existing_companies = db.scalars(select(Company).where(Company.lead_import_id == permanent.id)).all()
-    companies_by_key = {c.name.lower(): c for c in existing_companies}
+    # Seed with the run's existing companies so new leads at known companies attach to
+    # the same canonical Company row.
+    existing = db.scalars(
+        select(Company)
+        .join(CompanyQualification, CompanyQualification.company_id == Company.id)
+        .where(CompanyQualification.lead_import_id == permanent.id)
+    ).all()
+    companies_by_key = {_company_key(c.name, c.domain): c for c in existing}
 
     created, dropped, _ = _materialize_rows(
-        db, permanent, pending.raw_rows or [], mapping, dedup_index, companies_by_key, skip_identity=identity
+        db, permanent, pending_rows, mapping, dedup_index, companies_by_key, skip_identity=identity
     )
 
-    permanent.icp_snapshot_hash = icp_fingerprint(icp)
+    if icp:
+        permanent.icp_snapshot_hash = icp_fingerprint(icp)
     permanent.status = ImportStatus.IMPORTED
     permanent.total_rows = permanent.total_rows + created
     db.delete(pending)

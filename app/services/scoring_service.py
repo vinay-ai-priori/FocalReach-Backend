@@ -31,9 +31,11 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.models.company import CompanyQualification
 from app.models.icp import ICP
 from app.models.lead import Lead, LeadTier
 from app.models.lead_import import ImportStatus, LeadImport
+from app.repositories.company_repository import CompanyRepository
 from app.repositories.lead_repository import LeadRepository
 from app.services.ai.embedding_service import cosine, get_header_vectors, normalize_header
 
@@ -262,17 +264,20 @@ def score_signal(lead: Lead) -> tuple[float, str]:
     return scaled, "; ".join(notes) + f". Doc score {doc_total}/25 -> {scaled}/{SIGNAL_MAX}."
 
 
-# ---------- Part 3: Company Fit Score (from qualification) ----------
+# ---------- Part 3: Company Fit Score (from the run's qualification row) ----------
 
-def score_company_fit(lead: Lead) -> tuple[float, str]:
-    company = lead.company
-    if not company or company.industry_match_score is None or company.company_fit_score is None:
+def score_company_fit(qualification: CompanyQualification | None) -> tuple[float, str]:
+    if (
+        qualification is None
+        or qualification.industry_match_score is None
+        or qualification.company_fit_score is None
+    ):
         return 0.0, f"Company qualification scores unavailable -> 0/{COMPANY_FIT_MAX}."
-    average = (company.industry_match_score + company.company_fit_score) / 2
+    average = (qualification.industry_match_score + qualification.company_fit_score) / 2
     scaled = round(average * COMPANY_FIT_MAX / 100, 1)
     return scaled, (
-        f"Industry match {company.industry_match_score:.0f} + company fit {company.company_fit_score:.0f} "
-        f"-> avg {average:.0f}/100 -> {scaled}/{COMPANY_FIT_MAX}."
+        f"Industry match {qualification.industry_match_score:.0f} + company fit "
+        f"{qualification.company_fit_score:.0f} -> avg {average:.0f}/100 -> {scaled}/{COMPANY_FIT_MAX}."
     )
 
 
@@ -288,16 +293,23 @@ def tier_for(total: float) -> LeadTier:
     return LeadTier.DEPRIORITIZED
 
 
-def score_lead(lead: Lead, icp: ICP, role_match_index: dict[str, tuple[str, float]] | None = None) -> None:
+def score_lead(
+    lead: Lead,
+    icp: ICP,
+    role_match_index: dict[str, tuple[str, float]] | None = None,
+    qualification: CompanyQualification | None = None,
+) -> None:
     role, role_note = score_role(lead, role_match_index)
     signal, signal_note = score_signal(lead)
-    company_fit, fit_note = score_company_fit(lead)
+    company_fit, fit_note = score_company_fit(qualification)
     total = round(role + signal + company_fit, 1)
     lead.role_score = role
     lead.signal_score = signal
-    lead.company_fit_score = company_fit
     lead.total_score = total
-    lead.tier = tier_for(total)
+    # A human reactivation survives re-scoring: the deterministic tier would put the
+    # lead straight back in DEPRIORITIZED, silently undoing the user's decision.
+    if lead.tier != LeadTier.REACTIVATED:
+        lead.tier = tier_for(total)
     lead.score_breakdown = {
         "role": {"score": role, "note": role_note},
         "signal": {"score": signal, "note": signal_note},
@@ -309,9 +321,10 @@ def score_import(db: Session, lead_import: LeadImport, icp: ICP) -> dict:
     repo = LeadRepository(db)
     leads = repo.list_scorable_for_import(lead_import.id)
     role_match_index = build_role_match_index(db, icp, [lead.title for lead in leads])
+    qualifications = CompanyRepository(db).qualifications_by_company(lead_import.id)
     counts = {t.value: 0 for t in LeadTier}
     for lead in leads:
-        score_lead(lead, icp, role_match_index)
+        score_lead(lead, icp, role_match_index, qualifications.get(lead.company_id))
         counts[lead.tier.value] += 1
     lead_import.status = ImportStatus.SCORED
     db.commit()

@@ -27,7 +27,7 @@ def _get_owned_icp(icp_id: UUID, user: User, db: Session) -> ICP:
     icp = ICPRepository(db).get_by_public_id(icp_id)
     if not icp:
         raise NotFoundError(f"ICP {icp_id} not found.")
-    if icp.user_id is not None and icp.user_id != user.id:
+    if icp.campaign.user_id != user.id:
         raise Forbidden("This ICP belongs to another user's campaign.")
     return icp
 
@@ -36,17 +36,18 @@ def _get_owned_icp(icp_id: UUID, user: User, db: Session) -> ICP:
 def generate(
     payload: ICPGenerateRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)
 ) -> ICPOut:
-    """Generate (or return the user's existing active) ICP for a company intelligence profile."""
+    """Generate (or return the campaign's existing active) ICP for a company intelligence
+    profile. v2: ICPs are campaign artifacts, so a campaign is required."""
     intelligence = CompanyIntelligenceRepository(db).get_by_public_id(payload.company_intelligence_id)
     if not intelligence:
         raise NotFoundError(f"Company intelligence {payload.company_intelligence_id} not found.")
-    icp = generate_icp(db, intelligence, user_id=user.id)
-    if payload.campaign_id:
-        campaign = CampaignRepository(db).get_by_public_id(payload.campaign_id)
-        if campaign and campaign.user_id == user.id:
-            CampaignRepository(db).update(
-                campaign, company_intelligence_id=intelligence.id, icp_id=icp.id
-            )
+    campaign = (
+        CampaignRepository(db).get_by_public_id(payload.campaign_id) if payload.campaign_id else None
+    )
+    if not campaign or campaign.user_id != user.id:
+        raise NotFoundError("Campaign not found — an ICP must be generated inside a campaign.")
+    CampaignRepository(db).update(campaign, company_intelligence_id=intelligence.id)
+    icp = generate_icp(db, intelligence, campaign)
     return _icp_out(icp)
 
 
