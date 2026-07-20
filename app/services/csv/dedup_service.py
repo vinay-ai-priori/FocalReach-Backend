@@ -13,6 +13,7 @@ Rule (careful, lead-level, gated by company):
 """
 
 import re
+import time
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -129,6 +130,28 @@ def build_dedup_index(
     return index
 
 
+# Preview stats (compute_dedup_stats) re-run on every column-mapping edit while the user is
+# still on the upload/mapping screen — often several times in a row. Rebuilding the index means
+# re-querying every Lead+Company the organization has ever targeted, which dominates request time
+# for orgs with any real history. The index only depends on (organization_id, excluded import ids),
+# not on the mapping, so it's safe to cache briefly across those repeated edits. Confirm-time
+# dedup (import_service.py) calls build_dedup_index directly and is never served from this cache,
+# since that decision must always see the latest data.
+_DEDUP_INDEX_CACHE_TTL_SECONDS = 30
+_dedup_index_cache: dict[tuple, tuple[float, "DedupIndex"]] = {}
+
+
+def _cached_dedup_index(db: Session, organization_id: int | None, excluded: set[int]) -> "DedupIndex":
+    key = (organization_id, frozenset(excluded))
+    now = time.monotonic()
+    cached = _dedup_index_cache.get(key)
+    if cached is not None and now - cached[0] < _DEDUP_INDEX_CACHE_TTL_SECONDS:
+        return cached[1]
+    index = build_dedup_index(db, organization_id, excluded)
+    _dedup_index_cache[key] = (now, index)
+    return index
+
+
 def compute_dedup_stats(db: Session, lead_import: LeadImport) -> dict:
     """Analysis for the upload page, computed from the raw rows vs the organization's existing leads.
     Only rows that would actually be imported (see classify_row) are considered."""
@@ -142,7 +165,7 @@ def compute_dedup_stats(db: Session, lead_import: LeadImport) -> dict:
         campaign = db.get(Campaign, lead_import.campaign_id)
         if campaign and campaign.lead_import_id:
             excluded.add(campaign.lead_import_id)
-    index = build_dedup_index(db, lead_import.organization_id, excluded)
+    index = _cached_dedup_index(db, lead_import.organization_id, excluded)
     mapping = lead_import.column_mapping or {}
     rows = lead_import.raw_rows or []
 

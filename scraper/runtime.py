@@ -8,7 +8,7 @@ as a long-lived service/worker rather than a fresh CLI process per call:
   startup/teardown cost on every JS-fallback)
 - a semaphore capping how many full site-scrapes run concurrently, so a
   burst of calls doesn't starve individual requests of connections/CPU
-- a shared on-disk cache instance
+- an optional shared on-disk HTML cache (only when settings.cache_dir is set)
 
 Usage:
     async with ScraperRuntime(settings) as runtime:
@@ -30,7 +30,7 @@ from scraper.utils.cache import DiskCache
 class ScraperRuntime:
     def __init__(self, settings: ScraperSettings):
         self.settings = settings
-        self.cache = DiskCache(settings)
+        self.cache = DiskCache(settings) if settings.cache_dir else None
         self.scrape_semaphore = asyncio.Semaphore(settings.max_concurrent_scrapes)
 
         self._client: httpx.AsyncClient | None = None

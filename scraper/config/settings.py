@@ -26,9 +26,11 @@ class ScraperSettings(BaseModel):
     min_text_length_for_success: int = 200
     min_text_to_dom_ratio: float = 0.02
 
-    # Caching
+    # Caching of raw fetched HTML on disk. Off by default: production only
+    # persists the LLM-structured profile (global_companies table), never raw
+    # pages. Set a directory to opt in (e.g. local dev iteration on extraction).
     cache_ttl_seconds: int = 60 * 60 * 24  # 24h
-    cache_dir: str = ".cache"
+    cache_dir: str | None = None
 
     # LLM enrichment
     enable_llm_enrichment: bool = True

@@ -1,6 +1,7 @@
+import hashlib
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request, Response
 from sqlalchemy.orm import Session
 
 from app.api.auth_deps import Forbidden, get_current_user
@@ -77,8 +78,21 @@ def list_campaigns(
 
 
 @router.get("/{campaign_id}", response_model=CampaignOut)
-def get_campaign(campaign_id: UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> CampaignOut:
-    return to_out(_get_owned(db, campaign_id, user))
+def get_campaign(
+    campaign_id: UUID,
+    request: Request,
+    response: Response,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> CampaignOut:
+    # Polled by every workspace page while a background job is running — ETag lets an
+    # unchanged campaign row short-circuit to a bodyless 304 instead of resending full JSON.
+    out = to_out(_get_owned(db, campaign_id, user))
+    etag = hashlib.md5(out.model_dump_json().encode()).hexdigest()
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304)
+    response.headers["ETag"] = etag
+    return out
 
 
 @router.patch("/{campaign_id}", response_model=CampaignOut)

@@ -32,6 +32,24 @@ celery_app.conf.update(
     task_track_started=True,
     task_acks_late=True,
     worker_prefetch_multiplier=1,
+    # Two queues, two dedicated workers (see run.bat).
+    #
+    # "heavy": the only tasks that touch the scraper/Chromium (website.analyze,
+    # qualification.run). These are the ones whose RAM swings 200 MB-1.2 GB and
+    # whose wall-clock runs minutes-to-an-hour, so this worker stays solo-pool
+    # (concurrency 1) — never run two scrapes at once on a small instance.
+    #
+    # "light": everything else — beat-driven pollers/dispatch AND the fast,
+    # single-LLM-call tasks (email.draft, icp.generate, scoring.run,
+    # company_intelligence.generate) that never scrape. All of these are
+    # seconds-long and RAM-cheap, so one thread-pool worker (concurrency 2-4,
+    # see QUALIFY_LIGHT_WORKER_CONCURRENCY doc in run.bat) serves both without
+    # a long qualification run ever blocking a "regenerate draft" click.
+    task_default_queue="light",
+    task_routes={
+        "website.analyze": {"queue": "heavy"},
+        "qualification.run": {"queue": "heavy"},
+    },
     task_soft_time_limit=300,
     task_time_limit=360,
     # Outreach dispatch engine: 60s polling gives scheduled sends ~60s precision, well

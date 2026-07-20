@@ -23,29 +23,34 @@ from scraper.schema.models import ScrapeResult
 
 logger = get_logger(__name__)
 
-# One scrape at a time per call site (Celery task processes companies serially),
-# and a tighter budget than the CLI default so a slow site can't stall an import.
-# max_discovered_links caps the crawl to the top-ranked pages (home, about,
-# products, pricing, customers...) — without it, large sites blow the time
-# budget fetching hundreds of long-tail pages and the scrape returns nothing.
+# Wave-parallel scraping: one shared runtime (single httpx pool + single Chromium)
+# serves QUALIFY_PARALLELISM concurrent site scrapes — parallelism without paying a
+# browser process per company. max_discovered_links caps the crawl to the top-ranked
+# pages (home, about, products, pricing, customers...) — without it, large sites blow
+# the time budget fetching hundreds of long-tail pages and the scrape returns nothing.
 SCRAPER_SETTINGS = ScraperSettings(
-    max_concurrent_scrapes=1,
+    max_concurrent_scrapes=app_settings.QUALIFY_PARALLELISM,
     max_discovered_links=15,
     max_concurrent_browser_pages=6,
     global_budget_seconds=120.0,
-    cache_dir=".scraper_cache",
 )
 
 ENRICHMENT_CONTENT_MAX_CHARS = 20_000
 
 
-async def _scrape(url: str) -> ScrapeResult:
+async def _scrape_many(urls: list[str]) -> list[ScrapeResult | BaseException]:
+    """Scrape up to QUALIFY_PARALLELISM sites concurrently against one shared runtime.
+
+    Returns results in input order; a failed scrape yields its exception instead of
+    aborting the whole wave.
+    """
     async with ScraperRuntime(SCRAPER_SETTINGS) as runtime:
-        return await scrape_company_site(
-            url,
-            runtime,
-            SCRAPER_SETTINGS,
-            openai_api_key=app_settings.OPENAI_API_KEY,
+        return await asyncio.gather(
+            *[
+                scrape_company_site(url, runtime, SCRAPER_SETTINGS, openai_api_key=app_settings.OPENAI_API_KEY)
+                for url in urls
+            ],
+            return_exceptions=True,
         )
 
 
@@ -131,43 +136,12 @@ def _upsert_global_row(db: Session, domain: str, company: Company) -> None:
     row.valid_till = now + timedelta(days=app_settings.ENRICHMENT_TTL_DAYS)
 
 
-def enrich_company(db: Session, company: Company) -> dict | None:
-    """Scrape + structure the company website. Returns the profile, or None on failure.
-
-    Checks the cross-campaign cache (global_companies) first: a fresh row is reused
-    at zero scrape/LLM cost; a missing or expired row triggers a scrape whose result
-    is upserted back with a new validity window.
-
-    Failure is non-fatal: the company continues through qualification with CSV data only.
-    """
-    if company.enrichment_profile:
-        return company.enrichment_profile
-
-    if not company.website:
-        company.enriched_at_status = "no_website"
-        db.commit()
-        return None
-
-    domain = _resolve_domain(company)
-
-    cached = _fresh_global_row(db, domain)
-    if cached:
-        company.enrichment_profile = cached.enrichment_profile
-        if not company.enrichment_content:
-            company.enrichment_content = cached.enrichment_content
-        company.enriched_at_status = "enriched"
-        db.commit()
-        logger.info("Enrichment cache hit for %s (valid till %s)", domain, cached.valid_till)
-        return company.enrichment_profile
-
-    try:
-        result = asyncio.run(_scrape(company.website))
-    except Exception as exc:
-        logger.warning("Enrichment scrape failed for %s: %s", company.website, exc)
+def _apply_scrape(db: Session, company: Company, domain: str | None, result: ScrapeResult | BaseException) -> None:
+    """Write one scrape outcome onto the company row (and the global cache on success)."""
+    if isinstance(result, BaseException):
+        logger.warning("Enrichment scrape failed for %s: %s", company.website, result)
         company.enriched_at_status = "failed"
-        db.commit()
-        return None
-
+        return
     if not _has_signal(result):
         logger.warning(
             "Enrichment scrape returned no pages for %s (truncated_by_budget=%s)",
@@ -175,17 +149,14 @@ def enrich_company(db: Session, company: Company) -> dict | None:
             result.stats.truncated_by_budget,
         )
         company.enriched_at_status = "failed"
-        db.commit()
-        return None
+        return
 
-    profile = result.model_dump(mode="json", exclude={"stats"})
-    company.enrichment_profile = profile
+    company.enrichment_profile = result.model_dump(mode="json", exclude={"stats"})
     if not company.enrichment_content:
         company.enrichment_content = _profile_as_text(result)
     company.enriched_at_status = "enriched"
     if domain:
         _upsert_global_row(db, domain, company)
-    db.commit()
 
     usage = result.stats.llm_usage
     logger.info(
@@ -195,4 +166,42 @@ def enrich_company(db: Session, company: Company) -> dict | None:
         result.stats.duration_ms,
         usage.total_tokens if usage else "n/a",
     )
-    return profile
+
+
+def enrich_companies(db: Session, companies: list[Company]) -> None:
+    """Enrich a wave of companies: cache-first, then one parallel scrape of the misses.
+
+    Per company, in order: already-enriched rows are untouched; no website -> marked;
+    a fresh global_companies row (cross-campaign cache) is copied at zero cost; the
+    remainder are scraped concurrently against a shared runtime (one httpx pool + one
+    Chromium). Individual failures are non-fatal — those companies continue through
+    qualification with CSV data only. Commits once for the whole wave.
+    """
+    to_scrape: list[tuple[Company, str | None]] = []
+    for company in companies:
+        if company.enrichment_profile:
+            continue
+        if not company.website:
+            company.enriched_at_status = "no_website"
+            continue
+        domain = _resolve_domain(company)
+        cached = _fresh_global_row(db, domain)
+        if cached:
+            company.enrichment_profile = cached.enrichment_profile
+            if not company.enrichment_content:
+                company.enrichment_content = cached.enrichment_content
+            company.enriched_at_status = "enriched"
+            logger.info("Enrichment cache hit for %s (valid till %s)", domain, cached.valid_till)
+            continue
+        to_scrape.append((company, domain))
+
+    if to_scrape:
+        try:
+            results = asyncio.run(_scrape_many([company.website for company, _ in to_scrape]))
+        except Exception as exc:  # runtime startup/teardown failure hits the whole wave
+            logger.warning("Enrichment wave failed: %s", exc)
+            results = [exc] * len(to_scrape)
+        for (company, domain), result in zip(to_scrape, results):
+            _apply_scrape(db, company, domain, result)
+
+    db.commit()

@@ -40,6 +40,8 @@ class LeadImportOut(BaseModel):
     column_mapping: dict
     missing_fields: list
     error_message: str | None = None
+    enrichment_total: int | None = None
+    enrichment_done: int = 0
     created_at: datetime
 
 

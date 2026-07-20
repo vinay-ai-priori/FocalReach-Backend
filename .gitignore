@@ -47,12 +47,14 @@ local_settings.py
 db.sqlite3
 media/
 
-# Alembic / migrations
-alembic/versions/
-alembic.ini
-
 # Logs
 logs/
+
+# Celery beat schedule state
+celerybeat-schedule*
+
+# Scraper HTML cache (legacy — caching now disabled)
+.scraper_cache/
 
 # Editor directories and files
 .vscode/

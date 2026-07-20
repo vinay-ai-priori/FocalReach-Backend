@@ -4,19 +4,26 @@ ICP tone, lead-company enrichment, prospect location (regional English), and any
 previous drafts in the thread.
 
 Modes:
-- initial / regenerate: full draft in the fixed structure below.
+- initial: full draft in the pain-hook structure below, built around exactly ONE primary
+  pain chosen by matching ICP intent keywords against the lead company's data.
+- regenerate: a fresh full rewrite of the SAME argument — same primary pain, same proof
+  point, same CTA objective; only wording/structure/emphasis change.
 - shorter / more_technical / more_executive / more_friendly / personalize_further:
-  refine the CURRENT draft per the mode, keeping structure, tone, and grounding rules.
+  refine the CURRENT draft per the mode, keeping the same primary pain and proof point
+  (personalize_further may add one new supporting fact anchored to that same pain).
 
-Fixed structure (every draft):
-  Hello [lead first name],
-  I hope you are doing well,
-  Para 1 — about the lead's company (grounded in enrichment data).
-  Para 2 — continues from Para 1; the sender's company and how it solves that problem.
-  Para 3 — professional ask to share available times for a meeting (no booking links).
-  Best regards,
-  [sender name]
-  [sender company]
+Initial-email structure:
+  Subject: <pain hook> at <company>
+  Hey <lead first name>,
+  Personalization line (person-specific if the lead matches scraped people[], else a
+  company-level news/signal).
+  Pain statement (1-2 lines, the primary pain their role/industry faces).
+  Proof point (one stat or one-line result from sender data — never invented).
+  CTA: the campaign objective as a short question for <company> (no booking links).
+  <sign-off>,
+  <sender first name>
+
+Follow-up, LinkedIn, and call-script prompts are unchanged by the pain-hook template.
 """
 
 from sqlalchemy import select
@@ -45,6 +52,12 @@ logger = get_logger(__name__)
 
 REFINE_MODES = ("shorter", "more_technical", "more_executive", "more_friendly", "personalize_further")
 ALL_MODES = ("initial", "regenerate", *REFINE_MODES)
+
+# Initial-email modes that only rework what is already in the CURRENT DRAFT (pain, proof,
+# and CTA are locked to it), so they get a slim prompt: draft + tone + english variant +
+# names only. more_technical and personalize_further stay on the full prompt — they must
+# pull domain terminology / new facts from the enrichment and sender data.
+_SLIM_REFINE_MODES = ("regenerate", "shorter", "more_executive", "more_friendly")
 
 # The first draft stays low-temperature (consistent, tightly grounded). Regenerate asks
 # for a genuinely different take on the same brief, so it needs real variety. The
@@ -82,32 +95,38 @@ def _english_variant(lead: Lead, company: Company | None) -> tuple[str, str]:
     return ("Write in standard US English (recipient location unknown).", "")
 
 
-SYSTEM_PROMPT = """You write personalized B2B outreach emails. You MUST follow the exact structure and grounding rules below.
+SYSTEM_PROMPT = """You write personalized B2B cold outreach emails built around exactly ONE primary pain point. You MUST follow the exact structure, pain rules, and grounding rules below.
 
-STRUCTURE (mandatory, in this order):
-1. Greeting line: "Hello [recipient first name],"
-2. Opening line: "I hope you are doing well,"
-3. Paragraph 1 — about the RECIPIENT's company: reference concrete, specific facts from the provided enrichment data (what they do, their industry, technologies, or challenges). 2-3 sentences.
-4. Paragraph 2 — flows naturally from paragraph 1: introduce the SENDER's company and explain specifically how it solves the problem or supports the priority identified in paragraph 1. 2-3 sentences.
-5. Paragraph 3 — a professional closing ask: invite the recipient to share their available times to schedule a meeting. Do NOT include any booking links, URLs, or calendar links. 1-2 sentences.
-6. Sign-off exactly:
-Best regards,
-[sender name]
-[sender company]
+CHOOSING THE PRIMARY PAIN (do this first):
+- Pick ONE pain from the SOLVABLE PAIN POINTS list — the one most relevant to the recipient's role and seniority. If that list is empty, derive the pain from the ICP intent keywords and the company data instead.
+- Exactly one primary pain per email. Never blend two pains.
+
+SUBJECT (mandatory format): "<pain hook> at <recipient company name>" — the pain hook is a short (2-5 word) phrase naming the primary pain (e.g. "Unplanned downtime at Kentec"). It must name the PAIN, not a vague benefit ("Enhanced operational efficiency" is wrong). No clickbait, no ALL CAPS, no emojis.
+
+BODY STRUCTURE (mandatory, in this order — the body MUST contain exactly 4 separate paragraphs between the greeting and the sign-off: opener, pain, solution, CTA. Never merge two of them into one paragraph):
+1. Greeting line: "Hey <recipient first name>,"
+2. Personalization opener (1-2 sentences): grounded in something OBSERVED, never in the recipient's job title alone. If a PERSON MATCH is provided, open with that person-specific detail (their bio, program, or how their site mentions them). Otherwise open with a company-level signal — a NEWS item or a concrete fact from the company overview. Restating their title back at them ("As the Director of X, your role is pivotal...") is NOT personalization and is forbidden as an opener. This opener MUST be its own paragraph, separate from the pain paragraph. Only if there is no person match AND no company-level signal at all may you skip it and open with the pain paragraph.
+3. Pain paragraph (2-3 sentences): state the primary pain AND ground it in its evidence — why THIS company specifically faces it (cite the evidence from the pain point data). Connect it to what the RECIPIENT deals with in their role (use their title, seniority, or time in role where it fits naturally). Written about their world, not as a pitch.
+4. Solution paragraph (2-3 sentences): introduce the SENDER's company and the specific service that addresses that pain, explain briefly HOW it addresses it, and include ONE proof point drawn ONLY from the sender's provided data (a stat like "cut unplanned downtime by up to 30%" ONLY if that figure appears in the data; otherwise a qualitative result). NEVER invent a statistic. If the data names no customers or case studies, describe the capability only — phrases implying an existing customer base or track record ("we've seen clients...", "our customers...", "companies like yours", "helping companies like yours") are forbidden.
+5. Soft CTA (1 sentence, phrased as a question): a low-pressure ask to CONNECT or continue the conversation — gauge interest, offer to share more (e.g. "Would this be worth a conversation for <company>?" or "Happy to share how this could apply to <company> — interested?"). Do NOT ask for a meeting, a call, or a time commitment ("15-minute chat", "schedule a call", "share your availability" are all forbidden in this email). Do NOT include any booking links, URLs, or calendar links.
+6. Sign-off:
+<short sign-off matching the tone (e.g. "Best," or "Cheers,")>
+<sender first name>
 
 GROUNDING RULES (mandatory):
 - Use ONLY facts present in the provided data. Never invent customers, metrics, case studies, or claims.
+- FORBIDDEN unless the data names actual customers: "we've seen clients", "our clients", "our customers", "companies like yours", "teams like yours", or ANY sentence implying an existing customer base or track record. When in doubt, state what the product does — not who has used it.
 - If enrichment data is thin, stay general about their industry rather than fabricating specifics.
 - Match the requested TONE exactly.
 - Follow the ENGLISH VARIANT instruction exactly (spelling and phrasing).
-- If PREVIOUS DRAFTS are provided, write a fresh draft that does not repeat their exact sentences —
-  UNLESS the REFINEMENT INSTRUCTION below says this is a trim/condense of the CURRENT DRAFT, in which
-  case keep the CURRENT DRAFT's exact wording and only remove/shorten what the instruction says to.
+- If a REGENERATE or REFINEMENT INSTRUCTION is provided below, it is binding: keep the SAME primary pain, the SAME proof point, and the SAME CTA objective as the CURRENT DRAFT — never swap the primary pain for a different one — and change only what the instruction says to change.
+- If PREVIOUS DRAFTS are provided, do not repeat their exact sentences — UNLESS the instruction says this is a trim/condense of the CURRENT DRAFT, in which case keep the CURRENT DRAFT's exact wording and only remove/shorten.
 
-Return ONLY a JSON object:
-{"subject": string, "body": string, "referenced_data": [string, string, ...]}
+Return ONLY a JSON object with EXACTLY these four keys IN THIS ORDER — ALL FOUR ARE REQUIRED, never omit any of them:
+{"primary_pain": string, "subject": string, "referenced_data": [string, string, ...], "body": string}
+- primary_pain: REQUIRED and FIRST — a short phrase naming the ONE primary pain this email is built on.
 - body: plain text with real line breaks, following the structure above.
-- referenced_data: 3-6 short bullet strings, each naming a specific fact you used and where it came from (e.g. "Lead company enrichment: Kentec manufactures life-safety detection systems", "ICP tone: consultative", "Location: United Kingdom -> British English"). Only list facts actually used."""
+- referenced_data: 3-6 short bullet strings, each naming a specific fact you used and where it came from (e.g. "Intent keyword match: 'downtime' -> solvable pain point on unplanned outages", "Sender value proposition: reduces manual reporting effort", "Location: United Kingdom -> British English"). Only list facts actually used."""
 
 FOLLOW_UP_SYSTEM_PROMPT = """You write personalized B2B follow-up emails. An earlier outreach email (and possibly earlier follow-ups) went out to this recipient and received no reply. You MUST follow the exact structure and grounding rules below.
 
@@ -177,21 +196,52 @@ _REWORD_REQUIREMENT = (
     "rewrite them."
 )
 
+# One pain per lead across the whole sequence: every refine/regenerate keeps the CURRENT
+# DRAFT's primary pain, proof point, and CTA objective fixed. Only personalize_further may
+# ADD a new supporting fact, and even it may not introduce a competing pain.
+_PAIN_LOCK = (
+    "Keep the CURRENT DRAFT's primary pain, proof point, and the CTA's underlying objective EXACTLY the "
+    "same — do NOT swap the primary pain for a different one, even if other pain points are available in "
+    "the data. Restate the proof point at the SAME claim strength as the CURRENT DRAFT: do not add "
+    "evidential framing such as 'has been shown to', 'proven', or 'has demonstrated' unless those words "
+    "are already in the CURRENT DRAFT. ALWAYS keep the greeting line and the sign-off lines "
+    "(sign-off word + sender first name) — they must never be cut."
+)
+
+# Regenerate = "another draft of the same argument", not "a different argument": same
+# pain, same proof, same CTA objective — fresh full rewrite of the wording/structure.
+REGENERATE_INSTRUCTION = (
+    f"Produce a fresh full rewrite of the CURRENT DRAFT. {_PAIN_LOCK} "
+    "Re-write the wording, sentence construction, structure, and emphasis around those same facts — a "
+    "different opening angle on the SAME personalization signal, tighter or looser phrasing — so it reads "
+    "as another draft of the same argument, never a different argument. Do not add new facts and do not "
+    f"drop the existing ones. {_REWORD_REQUIREMENT}"
+)
+
 REFINE_INSTRUCTIONS: dict[str, str] = {
     # A trim, not a rewrite: keep the CURRENT DRAFT's exact sentences and wording, and
     # only cut redundant words/clauses or drop a less-essential sentence to hit roughly
     # two-thirds the length. Do NOT rephrase sentences that are kept as-is.
     "shorter": (
-        "Condense the CURRENT DRAFT to roughly two-thirds its length. This is a TRIM, not a rewrite: "
-        "reuse the CURRENT DRAFT's exact wording for every sentence you keep, and shorten only by "
-        "removing redundant words/clauses or cutting a less-essential sentence — do not rephrase "
-        "sentences that survive the cut. Keep the mandatory structure, all grounding rules, the same "
-        "core facts, and the same ask."
+        f"Condense the CURRENT DRAFT, cutting to the core ask. {_PAIN_LOCK} "
+        "NEVER delete the greeting line ('Hey <first name>,') or the sign-off lines — the output MUST still "
+        "start with the same greeting including the recipient's first name, and end with the same sign-off "
+        "and sender first name. "
+        "This is a TRIM, not a rewrite: keep the CURRENT DRAFT's words in their existing order and shorten "
+        "ONLY by deleting — never by substituting synonyms or reordering. Go sentence by sentence and strip "
+        "everything non-essential: softeners and filler openers ('I noticed that', 'I can imagine', 'I hope'), "
+        "adjectives and adverbs ('exciting', 'significantly', 'particularly'), and redundant clauses that "
+        "restate what another sentence already says. Every structural line must end up leaner. HARD TARGET: "
+        "the output body MUST have at LEAST 25% fewer words than the CURRENT DRAFT — count both and keep "
+        "deleting until you are under. The core ask is what must survive: the pain statement, the proof "
+        "point, and the CTA. To hit the target you SHOULD cut the personalization line down to a short "
+        "clause merged into the pain statement, or drop it entirely — for this mode only, that structure "
+        "exemption is allowed. Keep all remaining facts and all grounding rules."
     ),
-    "more_technical": f"Rewrite the CURRENT DRAFT for a technical reader: use precise domain and technology terminology drawn from the provided data (never invented), and make the value explanation more concrete about how the solution works. Keep the mandatory structure and grounding rules. {_REWORD_REQUIREMENT}",
-    "more_executive": f"Rewrite the CURRENT DRAFT for a senior executive reader: lead with business outcomes and strategic value, minimize operational detail, keep it crisp and confident. Keep the mandatory structure and grounding rules. {_REWORD_REQUIREMENT}",
-    "more_friendly": f"Rewrite the CURRENT DRAFT in a warmer, more personable register while remaining professional. Keep the mandatory structure, all facts, and grounding rules. {_REWORD_REQUIREMENT}",
-    "personalize_further": f"Rewrite the CURRENT DRAFT using MORE specific facts from the recipient company's enrichment data than the current draft does — pull in additional concrete details (offerings, technologies, pain points) that are present in the data but unused. Keep the mandatory structure and grounding rules. {_REWORD_REQUIREMENT}",
+    "more_technical": f"Rewrite the CURRENT DRAFT for a technical reader. {_PAIN_LOCK} Swap generic language for precise domain and technology terminology drawn from the provided data (never invented), and make the value explanation more concrete about how the solution works. Keep the mandatory structure and grounding rules. {_REWORD_REQUIREMENT}",
+    "more_executive": f"Rewrite the CURRENT DRAFT for a senior executive reader. {_PAIN_LOCK} Reframe the same pain and proof around business outcome, strategic value, and ROI rather than mechanism; minimize operational detail; keep it crisp and confident. Keep the mandatory structure and grounding rules. {_REWORD_REQUIREMENT}",
+    "more_friendly": f"Rewrite the CURRENT DRAFT in a warmer, more personable register while remaining professional. {_PAIN_LOCK} Use a more casual sign-off that still fits the tone. Keep the mandatory structure and grounding rules. {_REWORD_REQUIREMENT}",
+    "personalize_further": f"Rewrite the CURRENT DRAFT adding MORE specific personalization from the recipient company's enrichment data. {_PAIN_LOCK} You MAY add one new supporting fact (e.g. a secondary signal, or a short P.S. line) that is present in the data but unused — but it must reinforce the SAME primary pain, never introduce a competing pain. Keep the mandatory structure and grounding rules. {_REWORD_REQUIREMENT}",
 }
 
 
@@ -270,6 +320,105 @@ def _previous_drafts_block(draft: EmailDraft) -> str:
     return "\n".join(lines)
 
 
+def _sender_first_name(sender_name: str) -> str:
+    """First name for the sign-off, skipping leading initials: 'K Vinay Kumar Reddy'
+    signs as 'Vinay', not 'K'."""
+    tokens = [t for t in sender_name.split() if t]
+    for token in tokens:
+        if len(token.rstrip(".")) > 1:
+            return token
+    return tokens[0] if tokens else sender_name
+
+
+def _matched_person(lead: Lead, profile: dict) -> dict | None:
+    """Code-side lead-vs-scraped-people match, so the model never has to guess."""
+    lead_full = (lead.full_name or "").strip().lower()
+    first = (lead.first_name or "").strip().lower()
+    last = (lead.last_name or "").strip().lower()
+    for p in profile.get("people") or []:
+        if not isinstance(p, dict):
+            continue
+        name = (p.get("name") or "").strip().lower()
+        if not name:
+            continue
+        if name == lead_full or (first and last and first in name and last in name):
+            return {"name": p.get("name"), "title": p.get("title"), "bio_snippet": p.get("bio_snippet")}
+    return None
+
+
+def _company_overview(company: Company, profile: dict) -> str:
+    """Compose a compact overview from the structured scrape — replaces shipping the raw
+    profile JSON and raw website text to the drafter (huge token saving)."""
+    lines: list[str] = []
+    offering = profile.get("offering") or {}
+    for prod in (offering.get("products") or [])[:4]:
+        parts = [x for x in (prod.get("name"), prod.get("description")) if x] if isinstance(prod, dict) else []
+        if parts:
+            lines.append(f"- Product/Service: {' — '.join(parts)}")
+    if offering.get("target_customer_hint"):
+        lines.append(f"- Target customers: {offering['target_customer_hint']}")
+    signals = profile.get("icp_signals") or {}
+    if signals.get("industries_served"):
+        lines.append(f"- Industries served: {', '.join(signals['industries_served'][:6])}")
+    if signals.get("use_cases"):
+        lines.append(f"- Use cases: {', '.join(signals['use_cases'][:6])}")
+    return "\n".join(lines) or "Not available"
+
+
+def _news_block(profile: dict) -> str:
+    items = []
+    for n in (profile.get("news") or [])[:3]:
+        if isinstance(n, dict) and n.get("title"):
+            date = f" ({str(n['date'])[:10]})" if n.get("date") else ""
+            items.append(f"- {n['title']}{date}: {n.get('summary') or ''}".rstrip(": "))
+    return "\n".join(items) or "None found"
+
+
+def _initial_email_sections(
+    lead: Lead, company: Company, icp: ICP, intelligence: CompanyIntelligence,
+    sender_name: str, sender_company: str, variant_instruction: str, location: str,
+) -> list[str]:
+    """Curated inputs for the initial-email drafter: everything it needs, nothing more."""
+    profile = company.enrichment_profile or {}
+    person = _matched_person(lead, profile)
+    pains = company.solvable_pain_points or []
+    sections = [
+        f"TONE (from ICP): {icp.outreach_tone}",
+        f"CAMPAIGN OBJECTIVE: {icp.campaign_objective}",
+        f"ENGLISH VARIANT: {variant_instruction}",
+        "",
+        "SENDER:",
+        f"- Name: {sender_name} (first name for the sign-off: {_sender_first_name(sender_name)})",
+        f"- Company: {sender_company}",
+        f"- Company overview: {intelligence.summary}",
+        f"- Services: {[s.get('name') for s in (intelligence.services or [])][:5]}",
+        f"- Value propositions: {intelligence.value_propositions}",
+        "",
+        "RECIPIENT (the lead — speak to this person):",
+        f"- Name: {lead.full_name} (first name: {lead.first_name or lead.full_name.split()[0]})",
+        f"- Title: {lead.title or 'unknown'}",
+        f"- Seniority: {lead.seniority or 'unknown'}",
+        *([f"- Time in current role: {lead.time_in_role}"] if lead.time_in_role else []),
+        f"- Location: {location or 'unknown'}",
+        "",
+        "RECIPIENT COMPANY:",
+        f"- Name: {company.name} ({company.industry or 'industry unknown'})",
+        f"- Description: {company.description or 'N/A'}",
+        f"- Overview from their website:\n{_company_overview(company, profile)}",
+        "",
+        f"SOLVABLE PAIN POINTS (pick the primary pain from these; each has its evidence):\n"
+        f"{pains or 'None extracted'}",
+        "",
+        f"RECIPIENT COMPANY NEWS/SIGNALS (personalization opener when there is no person match):\n{_news_block(profile)}",
+        "",
+        "PERSON MATCH: "
+        + (str(person) if person else "None — the recipient does not appear on the company website; use a company-level signal for the opener."),
+    ]
+    if not pains:
+        sections += ["", f"ICP INTENT KEYWORDS (fallback for deriving the pain): {icp.target_keywords or []}"]
+    return sections
+
+
 def generate_email_draft(
     db: Session,
     draft: EmailDraft,
@@ -293,14 +442,69 @@ def generate_email_draft(
     draft.status = DraftStatus.GENERATING
     db.commit()
 
+    sender_name = (sender.full_name if sender else None) or "The team"
+    sender_company = intelligence.company_name or "our company"
+    variant_instruction, location = _english_variant(lead, company)
+    system_prompt = _system_prompt_for(draft)
+    is_initial_email = system_prompt is SYSTEM_PROMPT
+
+    if is_initial_email and mode in _SLIM_REFINE_MODES and draft.body:
+        # Slim prompt: these modes rewrite the CURRENT DRAFT without adding facts, so the
+        # draft itself is the only fact source they need.
+        instruction_label = "REGENERATE INSTRUCTION" if mode == "regenerate" else "REFINEMENT INSTRUCTION"
+        instruction = REGENERATE_INSTRUCTION if mode == "regenerate" else REFINE_INSTRUCTIONS[mode]
+        sections = [
+            f"TONE (from ICP): {icp.outreach_tone}",
+            f"ENGLISH VARIANT: {variant_instruction}",
+            "",
+            "SENDER:",
+            f"- First name (for the sign-off): {_sender_first_name(sender_name)}",
+            f"- Company: {sender_company}",
+            "",
+            "RECIPIENT:",
+            f"- First name: {lead.first_name or lead.full_name.split()[0]}",
+            f"- Company: {company.name}",
+        ]
+        if mode == "regenerate":
+            sections += [
+                "",
+                "PREVIOUS DRAFTS OF THIS STEP (do not drift back to their phrasing):\n"
+                f"{_previous_drafts_block(draft)}",
+            ]
+        sections += [
+            "",
+            f"CURRENT DRAFT (the one to {'rewrite' if mode == 'regenerate' else 'refine'}):",
+            f"Subject: {draft.subject or ''}",
+            draft.body or "",
+            "",
+            f"{instruction_label}: {instruction}",
+        ]
+        return _complete_draft(db, draft, "\n".join(sections), system_prompt, mode)
+
+    if is_initial_email:
+        # Curated inputs for the pain-hook template (initial + more_technical /
+        # personalize_further, which need the full data to add facts from).
+        sections = _initial_email_sections(
+            lead, company, icp, intelligence, sender_name, sender_company, variant_instruction, location
+        )
+        if draft.history:
+            sections += ["", f"PREVIOUS DRAFTS OF THIS STEP:\n{_previous_drafts_block(draft)}"]
+        if is_refine:
+            sections += [
+                "",
+                "CURRENT DRAFT (the one to refine):",
+                f"Subject: {draft.subject or ''}",
+                draft.body or "",
+                "",
+                f"REFINEMENT INSTRUCTION: {REFINE_INSTRUCTIONS[mode]}",
+            ]
+        return _complete_draft(db, draft, "\n".join(sections), system_prompt, mode)
+
+    # Full prompt path only: crawl (or reuse cached) website content for personalization.
     enrichment = _enrich_company(company)
     if enrichment and not company.enrichment_content:
         company.enrichment_content = enrichment[:20000]
         db.commit()
-
-    sender_name = (sender.full_name if sender else None) or "The team"
-    sender_company = intelligence.company_name or "our company"
-    variant_instruction, location = _english_variant(lead, company)
 
     sections = [
         f"TONE (from ICP): {icp.outreach_tone}",
@@ -309,6 +513,7 @@ def generate_email_draft(
         "",
         "SENDER:",
         f"- Name: {sender_name}",
+        f"- First name (for the sign-off): {_sender_first_name(sender_name)}",
         f"- Company: {sender_company}",
         f"- What the company does: {intelligence.summary}",
         f"- Key services: {[s.get('name') for s in (intelligence.services or [])][:5]}",
@@ -341,20 +546,26 @@ def generate_email_draft(
             "",
             f"REFINEMENT INSTRUCTION: {REFINE_INSTRUCTIONS[mode]}",
         ]
-    user_prompt = "\n".join(sections)
+    return _complete_draft(db, draft, "\n".join(sections), system_prompt, mode)
 
+
+def _complete_draft(db: Session, draft: EmailDraft, user_prompt: str, system_prompt: str, mode: str) -> EmailDraft:
+    """Run the completion and write the result (or failure) onto the draft row."""
     try:
         # Regenerate/refine must produce a NEW draft, so bypass the response cache for
         # everything except the very first generation.
         temperature = _TEMPERATURE_BY_MODE.get(mode, 0.7)  # refine modes default to 0.7
         data, was_cached = cached_json_completion(
-            _system_prompt_for(draft), user_prompt, skip_cache=mode != "initial", temperature=temperature
+            system_prompt, user_prompt, skip_cache=mode != "initial", temperature=temperature
         )
         referenced = data.get("referenced_data") or []
         if isinstance(referenced, list):
             referenced = [str(r).strip() for r in referenced if str(r).strip()]
         else:
             referenced = [str(referenced)]
+        primary_pain = str(data.get("primary_pain") or "").strip()
+        if primary_pain:
+            referenced.insert(0, f"Primary pain: {primary_pain}")
         draft.subject = data.get("subject")
         draft.body = data.get("body")
         draft.personalization_notes = " ".join(

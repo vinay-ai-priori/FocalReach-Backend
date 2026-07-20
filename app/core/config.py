@@ -41,6 +41,11 @@ class Settings(BaseSettings):
     # Freshness window for the cross-campaign enrichment cache (global_companies).
     # Rows older than this are re-scraped and refreshed in place.
     ENRICHMENT_TTL_DAYS: int = 10
+    # How many companies stage 2 of qualification (enrich + LLM ranking) processes in
+    # parallel per wave. Sizing guide: each concurrent scrape adds ~50-100 MB (httpx
+    # path) plus a shared Chromium (~300-500 MB) when JS fallbacks trigger; 5 keeps the
+    # worker around ~1 GB peak while cutting import wall-clock ~4-4.5x vs sequential.
+    QUALIFY_PARALLELISM: int = 5
 
     # Website intelligence
     WEBSITE_CACHE_TTL_SECONDS: int = 7 * 24 * 3600

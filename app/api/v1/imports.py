@@ -1,6 +1,7 @@
+import hashlib
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Request, Response, UploadFile
 from sqlalchemy.orm import Session
 
 from app.api.auth_deps import get_current_user
@@ -182,8 +183,23 @@ def upload_csv(
 
 
 @router.get("/{import_id}", response_model=LeadImportOut)
-def get_import(import_id: UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> LeadImportOut:
-    return _lead_import_out(get_owned_import(db, import_id, user))
+def get_import(
+    import_id: UUID,
+    request: Request,
+    response: Response,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> LeadImportOut:
+    # This endpoint is polled every ~1.2s while an import is qualifying/scoring. Most polls
+    # land between DB writes, so the payload is byte-identical to what the client already has —
+    # ETag lets those return a bodyless 304 instead of resending the same JSON over and over.
+    lead_import = get_owned_import(db, import_id, user)
+    out = _lead_import_out(lead_import)
+    etag = hashlib.md5(out.model_dump_json().encode()).hexdigest()
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304)  # bypasses response_model — no body, as required
+    response.headers["ETag"] = etag
+    return out
 
 
 @router.get("/{import_id}/validation", response_model=ImportValidationOut)

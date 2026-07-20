@@ -57,6 +57,12 @@ class LeadImport(Base, PublicIDMixin, TimestampMixin):
     raw_rows: Mapped[list | None] = mapped_column(JSONB, nullable=True)  # kept until import confirmed
     error_message: Mapped[str | None] = mapped_column(String(1024), nullable=True)
 
+    # Stage-2 enrichment progress (qualify_import, gate-passers only). NULL until stage 1
+    # finishes; enrichment_done is bumped once per wave commit. Lets the UI show "N of M
+    # companies enriched" without a live per-company count query.
+    enrichment_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    enrichment_done: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
     icp = relationship("ICP", back_populates="lead_imports")
     companies = relationship("Company", back_populates="lead_import", cascade="all, delete-orphan")
     leads = relationship("Lead", back_populates="lead_import", cascade="all, delete-orphan")
