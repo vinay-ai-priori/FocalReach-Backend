@@ -7,6 +7,10 @@ from pydantic import BaseModel, Field
 class BookingOut(BaseModel):
     public_id: UUID
     status: str
+    # "need_reply" | "booking_pending" — which Discovery section the card belongs to.
+    category: str
+    # "deterministic" | "ai" | None — how the reply's intent was detected.
+    detection: str | None = None
     resolved_start: datetime | None = None
     resolved_timezone: str | None = None
     timezone_source: str | None = None

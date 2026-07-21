@@ -7,7 +7,13 @@ from sqlalchemy.orm import Session
 from app.api.auth_deps import Forbidden, get_current_user
 from app.api.deps import get_db
 from app.core.exceptions import NotFoundError, ValidationFailedError
+from sqlalchemy import delete, select
+
 from app.models.campaign import Campaign, CampaignStatus
+from app.models.lead import Lead
+from app.models.lead_import import LeadImport
+from app.models.notification import Notification
+from app.models.pending_booking import PendingBooking
 from app.models.user import User
 from app.models.website_analysis import AnalysisStatus, WebsiteAnalysis
 from app.repositories.campaign_repository import CampaignRepository
@@ -109,8 +115,18 @@ def update_campaign(
 def delete_campaign(
     campaign_id: UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)
 ) -> CampaignOut:
-    """Delete the campaign aggregate. Its leads stay in the DB for org-level dedup."""
+    """Delete the campaign aggregate. Its leads stay in the DB for org-level dedup, but
+    their in-app artifacts (bell notifications, Discovery cards) are cleared first —
+    otherwise they'd linger with no campaign to route back to."""
     campaign = _get_owned(db, campaign_id, user)
     out = to_out(campaign)
+
+    lead_ids = select(Lead.id).join(LeadImport, Lead.lead_import_id == LeadImport.id).where(
+        LeadImport.campaign_id == campaign.id
+    )
+    db.execute(delete(Notification).where(Notification.lead_id.in_(lead_ids)))
+    db.execute(delete(PendingBooking).where(PendingBooking.lead_id.in_(lead_ids)))
+    db.commit()
+
     CampaignRepository(db).delete(campaign)
     return out

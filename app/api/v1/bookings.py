@@ -29,17 +29,22 @@ logger = get_logger(__name__)
 
 router = APIRouter(prefix="/bookings", tags=["bookings"], dependencies=[Depends(get_current_user)])
 
-# Statuses a user can still act on (book manually / send alternatives / dismiss).
-ACTIONABLE = (PendingBookingStatus.PENDING, PendingBookingStatus.NEEDS_REVIEW, PendingBookingStatus.AWAITING_RESLOT)
+# Statuses whose booking actions (book manually / suggest another time) still apply.
+BOOKABLE = (PendingBookingStatus.PENDING, PendingBookingStatus.NEEDS_REVIEW, PendingBookingStatus.AWAITING_RESLOT)
+# Rows a user can dismiss/decline — the bookable ones plus "need reply" cards.
+DISMISSABLE = (*BOOKABLE, PendingBookingStatus.NEEDS_REPLY)
 
 
 def _booking_out(b: PendingBooking) -> BookingOut:
     lead = b.lead
     reply = b.inbound_reply
     excerpt = (reply.body_text or "").strip().replace("\n", " ")[:300] if reply else None
+    category = "need_reply" if b.status == PendingBookingStatus.NEEDS_REPLY else "booking_pending"
     return BookingOut(
         public_id=b.public_id,
         status=b.status.value,
+        category=category,
+        detection=reply.intent_detection if reply else None,
         resolved_start=b.resolved_start,
         resolved_timezone=b.resolved_timezone,
         timezone_source=b.timezone_source.value if b.timezone_source else None,
@@ -100,7 +105,7 @@ def book_manually(
     Same at-most-once claim pattern as the orchestrator: PENDING->BOOKING is committed
     before the Cal.com call; a stale slot comes back as a 409 with the row restored."""
     booking = _get_owned_booking(db, booking_id, user, for_update=True)
-    if booking.status not in ACTIONABLE:
+    if booking.status not in BOOKABLE:
         raise ValidationFailedError(f"This booking is already {booking.status.value} — nothing to book.")
     if not booking.lead or not booking.lead.email:
         raise ValidationFailedError("The lead has no email address to book the meeting for.")
@@ -155,7 +160,7 @@ def send_alternatives(
     """Emails the lead the next available slots ("that time isn't available / here's
     my availability") via the drafter agent + the collision-safe dispatch pathway."""
     booking = _get_owned_booking(db, booking_id, user, for_update=True)
-    if booking.status not in ACTIONABLE:
+    if booking.status not in BOOKABLE:
         raise ValidationFailedError(f"This booking is already {booking.status.value}.")
     booking_orchestrator.send_alternatives_for_booking(db, booking)
     return _booking_out(booking)
@@ -168,6 +173,28 @@ def dismiss(
     booking = _get_owned_booking(db, booking_id, user, for_update=True)
     if booking.status == PendingBookingStatus.BOOKED:
         raise ValidationFailedError("This meeting is already booked on Cal.com — cancel it there instead.")
+    if booking.status not in DISMISSABLE:
+        raise ValidationFailedError(f"This booking is already {booking.status.value}.")
     booking.status = PendingBookingStatus.CANCELLED
     db.commit()
+    return _booking_out(booking)
+
+
+@router.post("/{booking_id}/mark-unread", response_model=BookingOut)
+def mark_unread(
+    booking_id: UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> BookingOut:
+    """Re-surface a Discovery card in the bell: raises a fresh unread notification for
+    this row's lead. Idempotent — the partial unique index on (lead, kind, unread)
+    means a duplicate insert while one is already unread is silently a no-op."""
+    booking = _get_owned_booking(db, booking_id, user)
+    kind = "reply_need_reply" if booking.status == PendingBookingStatus.NEEDS_REPLY else "reply_booking_pending"
+    reply = booking.inbound_reply
+    excerpt = (reply.body_text or "").strip().replace("\n", " ")[:300] if reply else ""
+    detail = (
+        f"Replied — needs your response: “{excerpt}”"
+        if kind == "reply_need_reply"
+        else f"Wants to book a call: “{excerpt}”"
+    )
+    booking_orchestrator._notify(db, user.id, booking.lead_id, kind, detail)
     return _booking_out(booking)

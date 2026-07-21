@@ -399,16 +399,69 @@ def qualify_import(db: Session, lead_import: LeadImport, icp: ICP) -> dict:
     return counts
 
 
+def reactivate_rejected(db: Session, lead_import: LeadImport, icp: ICP, company_ids: list[int]) -> dict:
+    """Bring gate-rejected companies into the campaign on explicit user override.
+
+    Rejected companies were dropped at Stage 1 (geography/size gate) with no enrichment
+    or scores. Reactivation runs the missing Stage-2 work — enrich each company's website,
+    then LLM-score industry match + company fit — and flips the verdict to REACTIVATED so
+    their leads join prioritization. Unlike the automated pipeline a low score never sends
+    them back to review: the user has decided to include them. Processed in waves like
+    qualify_import, committing per wave so progress is observable and restart-safe.
+    Idempotent: companies no longer REJECTED are skipped.
+    """
+    repo = CompanyRepository(db)
+    intelligence = icp.company_intelligence
+    targets: list[tuple[CompanyQualification, Company, list[dict]]] = []
+    for company_id in company_ids:
+        qualification = repo.qualification_for(lead_import.id, company_id)
+        if not qualification or qualification.qualification_status != QualificationStatus.REJECTED:
+            continue
+        company = db.get(Company, company_id)
+        if company is None:
+            continue
+        # Keep the gate checks that explain the original rejection; scoring appends to them.
+        targets.append((qualification, company, list(qualification.qualification_checks or [])))
+
+    if not targets:
+        return {"reactivated": 0}
+
+    parallelism = max(1, settings.QUALIFY_PARALLELISM)
+    waves = [targets[i:i + parallelism] for i in range(0, len(targets), parallelism)]
+    reactivated = 0
+    session = EnrichmentSession()
+    try:
+        previous: list | None = None
+        for wave in waves:
+            enrichment = session.start_wave(db, [company for _, company, _ in wave])
+            if previous is not None:
+                reactivated += _score_wave(db, previous, icp, intelligence, None, lead_import, parallelism, force_include=True)
+            session.finish_wave(db, enrichment)
+            previous = wave
+        reactivated += _score_wave(db, previous, icp, intelligence, None, lead_import, parallelism, force_include=True)
+    finally:
+        session.close()
+
+    return {"reactivated": reactivated}
+
+
 def _score_wave(
     db: Session,
     wave: list[tuple[CompanyQualification, Company, list[dict]]],
     icp: ICP,
     intelligence: CompanyIntelligence | None,
-    counts: dict,
+    counts: dict | None,
     lead_import: LeadImport,
     parallelism: int,
-) -> None:
-    """LLM-score one enriched wave and commit its verdicts (caller's thread only)."""
+    force_include: bool = False,
+) -> int:
+    """LLM-score one enriched wave and commit its verdicts (caller's thread only).
+
+    Returns the number of companies processed. force_include (reactivation of rejected
+    companies) overrides the scored verdict to REACTIVATED — the scores are still computed
+    and stored to feed lead company-fit, but a low average no longer routes to review, and
+    the import-level enrichment denominator is left untouched (it belongs to qualify_import).
+    """
     with ThreadPoolExecutor(max_workers=parallelism) as pool:
         futures = [pool.submit(score_company_fit, company, icp, intelligence) for _, company, _ in wave]
         outcomes = []
@@ -420,11 +473,17 @@ def _score_wave(
 
     for (qualification, company, checks), outcome in zip(wave, outcomes):
         status = _apply_scoring_result(qualification, company, checks, outcome)
+        if force_include:
+            status = QualificationStatus.REACTIVATED
+            qualification.qualification_override = True
+        elif counts is not None:
+            counts[status.value] += 1
         qualification.qualification_status = status
         qualification.qualification_checks = checks
-        counts[status.value] += 1
 
-    lead_import.enrichment_done += len(wave)
+    if not force_include:
+        lead_import.enrichment_done += len(wave)
     db.commit()  # per-wave commit: progress survives worker restarts
     for _, company, _ in wave:
         db.expire(company, _HEAVY_COMPANY_FIELDS)
+    return len(wave)

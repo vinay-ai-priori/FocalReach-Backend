@@ -1,16 +1,15 @@
 """Routes a classified inbound reply to its intent-specific action. Called once per
 InboundReply by app/tasks/inbox_poll_tasks.py, right after intent_classifier runs.
 
-Every intent, on arrival, first stops the OLD fixed-cadence follow-up sequence for the
-lead (cancelling any already-SCHEDULED follow-up so it can't fire mid-conversation) —
-a reply of any kind means the conversation has moved on from the automated nudge
-cadence. From there:
+Every reply, on arrival, first stops the OLD fixed-cadence follow-up sequence for the
+lead (cancelling any already-SCHEDULED follow-up so it can't fire mid-conversation) and
+pauses outreach — a reply of any kind means the conversation has moved on from the
+automated nudge cadence. From there the intent (two-way, see intent_classifier.py):
 
-- negative/neutral/booked: the lead's outreach is paused outright (nothing further is
-  automated — booked still needs a human/Cal.com to actually confirm the meeting).
-- positive: outreach is NOT paused — instead a "share your availability" email is
-  drafted and dispatched immediately through the existing scheduling-service pathway
-  (allocate_send_slot), so it can't collide with any other dispatch for this user.
+- need_reply: a NEEDS_REPLY pending-booking row is created so the reply surfaces on the
+  Discovery page's "Need Reply" list, and the bell is nudged. A human replies manually.
+- booking_pending: the proposed date/time is extracted and (when resolvable) handed to
+  the Cal.com booking orchestrator; the row surfaces under "Booking Pending".
 """
 
 from datetime import datetime, timezone
@@ -24,7 +23,6 @@ from app.core.logging import get_logger
 from app.models.email_draft import (
     STEP_FOLLOW_UP_FIRST,
     STEP_FOLLOW_UP_LAST,
-    STEP_SCHEDULING_REPLY,
     DraftChannel,
     DraftStatus,
     EmailDraft,
@@ -34,18 +32,10 @@ from app.models.lead import Lead
 from app.models.notification import Notification
 from app.models.pending_booking import PendingBooking, PendingBookingStatus, TimezoneSource
 from app.repositories.calcom_repository import CalComConnectionRepository
-from app.repositories.mailbox_repository import MailboxConnectionRepository
 from app.services.inbox.datetime_extractor import extract_datetime, resolve_to_instant
 from app.services.inbox.intent_classifier import classify_reply
-from app.services.scheduling_service import acquire_user_schedule_lock, allocate_send_slot, db_now
 
 logger = get_logger(__name__)
-
-SCHEDULING_REPLY_SUBJECT_FALLBACK = "Let's find a time"
-SCHEDULING_REPLY_BODY = (
-    "Great — could you share a date and time that works for you (and your timezone)? "
-    "I'll get something on the calendar right away."
-)
 
 
 def _cancel_scheduled_followups(db: Session, lead: Lead) -> None:
@@ -82,31 +72,6 @@ def _notify(db: Session, user_id: int, lead: Lead, kind: str, detail: str, due_s
         db.rollback()  # an unread notification of this kind for this lead already exists
 
 
-def _dispatch_scheduling_reply(db: Session, lead: Lead, user_id: int, in_reply_to_subject: str | None) -> None:
-    subject = f"Re: {in_reply_to_subject}" if in_reply_to_subject else SCHEDULING_REPLY_SUBJECT_FALLBACK
-    draft = EmailDraft(
-        lead_id=lead.id,
-        channel=DraftChannel.EMAIL,
-        step_index=STEP_SCHEDULING_REPLY,
-        status=DraftStatus.READY,
-        subject=subject,
-        body=SCHEDULING_REPLY_BODY,
-    )
-    db.add(draft)
-    db.commit()
-    db.refresh(draft)
-
-    # Same collision-safe "send now" pathway manual Send uses — never steals another
-    # dispatch's slot, and if something's already claiming `now` this just lands a
-    # few seconds later instead of colliding.
-    acquire_user_schedule_lock(db, user_id)
-    slot = allocate_send_slot(db, user_id, db_now(db), exclude_draft_id=draft.id)
-    draft.status = DraftStatus.SCHEDULED
-    draft.scheduled_at = slot
-    draft.scheduled_by_user_id = user_id
-    db.commit()
-
-
 def _lead_fallback_timezone(lead: Lead) -> str | None:
     if lead.timezone:
         return lead.timezone
@@ -141,31 +106,20 @@ def route_reply(db: Session, inbound_reply: InboundReply) -> None:
         inbound_reply.intent = result.intent
         inbound_reply.intent_confidence = result.confidence
         inbound_reply.intent_reason = result.reason
+        inbound_reply.intent_detection = result.detection
         db.commit()
 
         _cancel_scheduled_followups(db, lead)
 
         excerpt = (inbound_reply.body_text or "").strip().replace("\n", " ")[:300]
 
-        if result.intent == ReplyIntent.NEGATIVE:
-            _pause_lead(db, lead)
-            _notify(db, user_id, lead, "reply_negative", f"Not interested: “{excerpt}”")
-
-        elif result.intent == ReplyIntent.NEUTRAL:
-            _pause_lead(db, lead)
-            _notify(
-                db, user_id, lead, "reply_neutral",
-                f"Wants to wait: “{excerpt}” — outreach paused. You can reply manually now, "
-                "or resume outreach from the lead's page when the timing is right.",
-            )
-
-        elif result.intent == ReplyIntent.BOOKED:
-            _pause_lead(db, lead)
-            _handle_booked(db, lead, user_id, inbound_reply)
-
-        elif result.intent == ReplyIntent.POSITIVE:
-            _dispatch_scheduling_reply(db, lead, user_id, inbound_reply.subject)
-            _notify(db, user_id, lead, "reply_positive", f"Interested — asked for their availability: “{excerpt}”")
+        # A reply of either kind pauses the automated cadence — the conversation is now
+        # a human one. BOOKING_PENDING additionally tries to auto-resolve the date/time.
+        _pause_lead(db, lead)
+        if result.intent == ReplyIntent.BOOKING_PENDING:
+            _handle_booking_pending(db, lead, user_id, inbound_reply)
+        else:
+            _handle_need_reply(db, lead, user_id, inbound_reply, excerpt)
 
         inbound_reply.processed_at = datetime.now(timezone.utc)
         db.commit()
@@ -177,7 +131,23 @@ def route_reply(db: Session, inbound_reply: InboundReply) -> None:
         db.commit()
 
 
-def _handle_booked(db: Session, lead: Lead, user_id: int, inbound_reply: InboundReply) -> None:
+def _handle_need_reply(db: Session, lead: Lead, user_id: int, inbound_reply: InboundReply, excerpt: str) -> None:
+    """A reply with no schedulable date/time. Surface it on the Discovery page's
+    "Need Reply" list (a NEEDS_REPLY pending-booking row) and nudge the bell."""
+    db.add(
+        PendingBooking(
+            lead_id=lead.id,
+            inbound_reply_id=inbound_reply.id,
+            user_id=user_id,
+            status=PendingBookingStatus.NEEDS_REPLY,
+            timezone_source=TimezoneSource.UNKNOWN,
+        )
+    )
+    db.commit()
+    _notify(db, user_id, lead, "reply_need_reply", f"Replied — needs your response: “{excerpt}”")
+
+
+def _handle_booking_pending(db: Session, lead: Lead, user_id: int, inbound_reply: InboundReply) -> None:
     received_at = inbound_reply.received_at or datetime.now(timezone.utc)
     extracted = extract_datetime(inbound_reply.body_text or "", received_at)
     fallback_tz = _lead_fallback_timezone(lead)
@@ -220,7 +190,7 @@ def _handle_booked(db: Session, lead: Lead, user_id: int, inbound_reply: Inbound
     else:
         detail = "Wants to book a call but the date/time wasn't clear enough to auto-resolve — check the reply."
 
-    _notify(db, user_id, lead, "reply_booked", detail)
+    _notify(db, user_id, lead, "reply_booking_pending", detail)
 
 
 def enqueue_booking_processing(booking_id: int) -> None:

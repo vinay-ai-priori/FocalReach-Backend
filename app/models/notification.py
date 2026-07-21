@@ -8,14 +8,14 @@ from app.db.base import Base, PublicIDMixin, TimestampMixin
 
 class Notification(Base, PublicIDMixin, TimestampMixin):
     """In-app nudge shown in the campaign header bell. Kinds: follow_up_due (a lead's
-    last outreach email has gone unanswered past its cadence window), and the
-    reply-poller kinds raised by app/services/inbox/reply_router.py — reply_negative,
-    reply_neutral, reply_booked. Nothing is ever sent or generated automatically from
-    a notification itself; it only routes the user to the lead (except reply_negative
-    is auto-scheduled and reply_positive auto-sends a follow-up — see reply_router).
+    last outreach email has gone unanswered past its cadence window); the reply-poller
+    kinds raised by app/services/inbox/reply_router.py — reply_need_reply,
+    reply_booking_pending; and the Cal.com booking kinds (booking_confirmed,
+    booking_alternatives, booking_needs_review). Nothing is ever sent or generated from
+    a notification itself; clicking it only routes the user to the relevant page.
 
     At most one UNREAD notification per (lead, kind) is enforced by the partial unique
-    index ux_notifications_lead_kind_unread, so the beat task can insert blindly."""
+    index ux_notifications_lead_kind_unread, so producers can insert blindly."""
 
     __tablename__ = "notifications"
 

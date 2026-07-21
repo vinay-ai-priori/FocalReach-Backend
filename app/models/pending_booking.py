@@ -9,6 +9,7 @@ from app.db.base import Base, PublicIDMixin, TimestampMixin
 
 
 class PendingBookingStatus(str, enum.Enum):
+    NEEDS_REPLY = "needs_reply"  # reply had no date/time — shown under "Need Reply", human replies manually
     PENDING = "pending"  # date/time resolved — queued for the booking orchestrator
     NEEDS_REVIEW = "needs_review"  # extraction failed/ambiguous OR automation hit an error — human decides
     BOOKING = "booking"  # transient claim while the Cal.com booking API call is in flight

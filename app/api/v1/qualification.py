@@ -12,6 +12,7 @@ from app.models.user import User
 from app.repositories.company_repository import CompanyRepository
 from app.schemas.common import TaskAccepted
 from app.schemas.company import BulkApproveRequest, CompanyOut, QualificationDecision, QualificationSummary
+from app.tasks.qualification_tasks import reactivate_rejected_task
 from app.tasks.scoring_tasks import score_import_task
 
 router = APIRouter(prefix="/qualification", tags=["company-qualification"])
@@ -129,6 +130,39 @@ def bulk_approve(
         score_import_task.delay(lead_import.id)
 
     return summary(import_id, user, db)
+
+
+@router.post("/imports/{import_id}/companies/reactivate-rejected", response_model=TaskAccepted)
+def reactivate_rejected(
+    import_id: UUID,
+    payload: BulkApproveRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> TaskAccepted:
+    """Reactivate gate-rejected companies. Unlike REVIEW companies, these were never
+    enriched or scored, so a background task runs enrichment + fit scoring before
+    flipping them to REACTIVATED — their leads then join prioritization on the next
+    scoring run (the page's "Proceed to Lead Prioritization" button)."""
+    if not payload.company_ids:
+        raise ValidationFailedError("Select at least one company to reactivate.")
+    lead_import = get_owned_import(db, import_id, user)
+    repo = CompanyRepository(db)
+
+    internal_ids: list[int] = []
+    for company_id in payload.company_ids:
+        company = repo.get_by_public_id(company_id)
+        qualification = repo.qualification_for(lead_import.id, company.id) if company else None
+        if not qualification:
+            raise NotFoundError(f"Company {company_id} is not part of this import.")
+        if qualification.qualification_status != QualificationStatus.REJECTED:
+            continue  # only rejected companies need the enrich+score path; skip others
+        internal_ids.append(company.id)
+
+    if not internal_ids:
+        raise ValidationFailedError("None of the selected companies are rejected.")
+
+    task = reactivate_rejected_task.delay(lead_import.id, internal_ids)
+    return TaskAccepted(task_id=task.id, status="reactivating", resource_id=lead_import.public_id)
 
 
 @router.post("/imports/{import_id}/finalize", response_model=TaskAccepted)
