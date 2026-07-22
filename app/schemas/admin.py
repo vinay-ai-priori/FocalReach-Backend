@@ -70,3 +70,18 @@ class UserUpdate(BaseModel):
 
 class AdminUserOut(UserOut):
     organization_name: str | None = None
+
+
+# ---------- Sessions ----------
+class SessionOut(BaseModel):
+    """One active login per user (tagline: 'one user = one active login')."""
+
+    user_public_id: UUID
+    full_name: str
+    email: str
+    role: str
+    organization_name: str | None = None
+    signed_in_at: datetime | None = None  # user.last_login_at
+    last_active_at: datetime  # most recent live refresh-token issue
+    device: str | None = None  # browser parsed from the User-Agent
+    session_count: int = 1  # number of live refresh tokens for this user

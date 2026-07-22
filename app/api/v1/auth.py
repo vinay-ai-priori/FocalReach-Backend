@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
 from app.api.auth_deps import get_current_user
@@ -29,14 +29,14 @@ def _user_out(user: User) -> UserOut:
 
 
 @router.post("/login", response_model=TokenResponse)
-def login(payload: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse:
-    user, tokens = auth_service.login(db, payload.email, payload.password)
+def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)) -> TokenResponse:
+    user, tokens = auth_service.login(db, payload.email, payload.password, request.headers.get("user-agent"))
     return TokenResponse(**tokens, user=_user_out(user))
 
 
 @router.post("/refresh", response_model=TokenResponse)
-def refresh(payload: RefreshRequest, db: Session = Depends(get_db)) -> TokenResponse:
-    user, tokens = auth_service.refresh(db, payload.refresh_token)
+def refresh(payload: RefreshRequest, request: Request, db: Session = Depends(get_db)) -> TokenResponse:
+    user, tokens = auth_service.refresh(db, payload.refresh_token, request.headers.get("user-agent"))
     return TokenResponse(**tokens, user=_user_out(user))
 
 

@@ -59,9 +59,11 @@ def _clear_failures(email: str) -> None:
         pass
 
 
-def _issue_tokens(db: Session, user: User) -> dict:
+def _issue_tokens(db: Session, user: User, user_agent: str | None = None) -> dict:
     raw, token_hash, expires_at = generate_refresh_token()
-    RefreshTokenRepository(db).create(RefreshToken(user_id=user.id, token_hash=token_hash, expires_at=expires_at))
+    RefreshTokenRepository(db).create(
+        RefreshToken(user_id=user.id, token_hash=token_hash, expires_at=expires_at, user_agent=user_agent)
+    )
     return {
         "access_token": create_access_token(user.id, user.role.value, user.organization_id),
         "refresh_token": raw,
@@ -69,7 +71,7 @@ def _issue_tokens(db: Session, user: User) -> dict:
     }
 
 
-def login(db: Session, email: str, password: str) -> tuple[User, dict]:
+def login(db: Session, email: str, password: str, user_agent: str | None = None) -> tuple[User, dict]:
     email = email.strip().lower()
     _check_lockout(email)
 
@@ -83,10 +85,10 @@ def login(db: Session, email: str, password: str) -> tuple[User, dict]:
     _clear_failures(email)
     user.last_login_at = datetime.now(timezone.utc)
     db.commit()
-    return user, _issue_tokens(db, user)
+    return user, _issue_tokens(db, user, user_agent)
 
 
-def refresh(db: Session, raw_refresh_token: str) -> tuple[User, dict]:
+def refresh(db: Session, raw_refresh_token: str, user_agent: str | None = None) -> tuple[User, dict]:
     repo = RefreshTokenRepository(db)
     token = repo.get_by_hash(hash_refresh_token(raw_refresh_token))
     now = datetime.now(timezone.utc)
@@ -99,7 +101,8 @@ def refresh(db: Session, raw_refresh_token: str) -> tuple[User, dict]:
 
     token.revoked_at = now  # rotation: each refresh token is single-use
     db.commit()
-    return user, _issue_tokens(db, user)
+    # Carry the device forward across rotations; fall back to the prior token's value.
+    return user, _issue_tokens(db, user, user_agent or token.user_agent)
 
 
 def logout(db: Session, raw_refresh_token: str | None) -> None:

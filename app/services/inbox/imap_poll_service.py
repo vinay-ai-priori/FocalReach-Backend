@@ -8,6 +8,7 @@ import email
 import email.policy
 import imaplib
 import re
+import time
 from datetime import datetime, timezone
 from email.utils import parseaddr, parsedate_to_datetime
 
@@ -29,14 +30,95 @@ from app.services.mailbox.providers import get_preset
 logger = get_logger(__name__)
 
 CONNECT_TIMEOUT_SECONDS = 20
+# Connecting/logging into IMAP is the most failure-prone step (network latency,
+# Gmail throttling a fresh login, servers dropping the socket mid-command). Retry it
+# a few times with linear backoff before giving up on this tick — a single slow
+# login must not skip the whole poll. A tick that still fails loses nothing: the poll
+# cursor only advances after messages are processed, so the next tick resumes from
+# exactly where this one left off.
+CONNECT_MAX_ATTEMPTS = 3
+CONNECT_RETRY_BACKOFF_SECONDS = 3
+# Transient failures worth retrying: read/connect timeouts (TimeoutError), socket
+# errors (OSError — TimeoutError and ssl.SSLError are both subclasses), and IMAP4.abort
+# (server closed the connection mid-command). Auth failures raise the bare
+# imaplib.IMAP4.error, which is deliberately NOT retried — a bad app password won't
+# fix itself, so it surfaces immediately instead of wasting three slow attempts.
+_RETRYABLE_CONNECT_ERRORS = (TimeoutError, OSError, imaplib.IMAP4.abort)
+
+
+def _connect_and_login(preset, email_address: str, app_password: str) -> imaplib.IMAP4_SSL:
+    """Opens an authenticated IMAP4_SSL connection, retrying transient network/server
+    failures with backoff. Raises the last error if every attempt fails; auth errors
+    propagate on the first attempt without retrying."""
+    last_err: Exception | None = None
+    for attempt in range(1, CONNECT_MAX_ATTEMPTS + 1):
+        conn: imaplib.IMAP4_SSL | None = None
+        try:
+            conn = imaplib.IMAP4_SSL(preset.imap_host, preset.imap_port, timeout=CONNECT_TIMEOUT_SECONDS)
+            conn.login(email_address, app_password)
+            return conn
+        except _RETRYABLE_CONNECT_ERRORS as err:
+            last_err = err
+            # Close any half-open socket before retrying so it doesn't leak until GC.
+            if conn is not None:
+                try:
+                    conn.logout()
+                except Exception:
+                    pass
+            logger.warning(
+                "IMAP connect/login attempt %d/%d failed for %s: %s",
+                attempt,
+                CONNECT_MAX_ATTEMPTS,
+                email_address,
+                err,
+            )
+            if attempt < CONNECT_MAX_ATTEMPTS:
+                time.sleep(CONNECT_RETRY_BACKOFF_SECONDS * attempt)
+        except Exception:
+            # Non-retryable (e.g. IMAP4.error auth failure): clean up and re-raise now.
+            if conn is not None:
+                try:
+                    conn.logout()
+                except Exception:
+                    pass
+            raise
+    assert last_err is not None  # loop only exits via return or an exception otherwise
+    raise last_err
 
 # Auto-replies/bounces/list mail should never be treated as a prospect's reply.
 _AUTO_SENDER_PATTERNS = re.compile(
     r"(mailer-daemon|postmaster|no-?reply|do-?not-?reply|bounce|notifications?@)", re.IGNORECASE
 )
-_QUOTE_MARKERS = re.compile(
-    r"^(On .{0,120} wrote:|-{2,}\s*Original Message\s*-{2,}|From:\s.+)$", re.IGNORECASE | re.MULTILINE
+# The quoted-reply attribution line email clients insert above the original message,
+# e.g. "On Wed, 22 Jul 2026, 10:59, <alice@acme.com> wrote:". Gmail/Outlook frequently
+# place it INLINE — right after the sender's text on the same line — so it must be
+# matched anywhere, not anchored to the start of a line (the old ^...$ pattern missed
+# exactly this, leaking the quoted thread's date/time/address into the body). Requiring
+# a digit or "@" between "On" and "wrote:" keeps ordinary prose like "...as I wrote:"
+# from matching. DOTALL lets the attribution span wrapped lines.
+_REPLY_ATTRIBUTION = re.compile(r"On\s.{0,200}?[\d@].{0,200}?\bwrote:", re.IGNORECASE | re.DOTALL)
+
+# Forwarded/replied header blocks and separators that also mark the start of quoted
+# content (matched at line start).
+_QUOTE_BLOCK_MARKERS = re.compile(
+    r"^\s*(-{2,}\s*Original Message\s*-{2,}|_{5,}\s*|From:\s?.+|Sent:\s?.+|To:\s?.+|Subject:\s?.+)$",
+    re.IGNORECASE | re.MULTILINE,
 )
+
+
+def _strip_quoted_reply(text: str) -> str:
+    """Returns only the sender's own new text. Everything from the first quoted-reply
+    marker onward — the inline "On … wrote:" attribution or a forwarded-header block —
+    is dropped, along with any '>'-prefixed quote lines, so the quoted thread's dates,
+    times, and addresses never reach the classifier or datetime extractor."""
+    cut = len(text)
+    for pattern in (_REPLY_ATTRIBUTION, _QUOTE_BLOCK_MARKERS):
+        match = pattern.search(text)
+        if match:
+            cut = min(cut, match.start())
+    text = text[:cut]
+    lines = [line.rstrip() for line in text.splitlines() if not line.strip().startswith(">")]
+    return "\n".join(lines).strip()
 
 
 def _is_auto_reply(msg: "email.message.EmailMessage", from_address: str) -> bool:
@@ -63,13 +145,8 @@ def _extract_plain_text(msg: "email.message.EmailMessage") -> str:
         return ""
     if body_part.get_content_type() == "text/html":
         text = re.sub(r"<[^>]+>", " ", text)
-    # Cut at the first quoted-reply marker so classification/extraction only sees the
-    # prospect's new text, not the whole quoted thread history.
-    match = _QUOTE_MARKERS.search(text)
-    if match:
-        text = text[: match.start()]
-    lines = [line.rstrip() for line in text.splitlines() if not line.strip().startswith(">")]
-    return "\n".join(lines).strip()[:8000]
+    # Keep only the sender's new text — strip the quoted thread (inline or block).
+    return _strip_quoted_reply(text)[:8000]
 
 
 def _match_lead(db: Session, user_id: int, references: list[str], from_address: str) -> tuple[Lead | None, EmailDraft | None]:
@@ -114,8 +191,8 @@ def poll_mailbox(db: Session, mailbox: MailboxConnection) -> list[InboundReply]:
     app_password = decrypt_secret(mailbox.encrypted_app_password)
     new_rows: list[InboundReply] = []
 
-    with imaplib.IMAP4_SSL(preset.imap_host, preset.imap_port, timeout=CONNECT_TIMEOUT_SECONDS) as conn:
-        conn.login(mailbox.email_address, app_password)
+    conn = _connect_and_login(preset, mailbox.email_address, app_password)
+    with conn:
         status, data = conn.select("INBOX", readonly=True)
         if status != "OK":
             raise RuntimeError(f"Could not select INBOX for {mailbox.email_address}: {data}")

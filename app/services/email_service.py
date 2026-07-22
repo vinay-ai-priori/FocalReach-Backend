@@ -36,6 +36,7 @@ from app.models.company_intelligence import CompanyIntelligence
 from app.models.email_draft import (
     STEP_FOLLOW_UP_FIRST,
     STEP_FOLLOW_UP_LAST,
+    STEP_INITIAL,
     DraftChannel,
     DraftStatus,
     EmailDraft,
@@ -128,23 +129,31 @@ Return ONLY a JSON object with EXACTLY these four keys IN THIS ORDER — ALL FOU
 - body: plain text with real line breaks, following the structure above.
 - referenced_data: 3-6 short bullet strings, each naming a specific fact you used and where it came from (e.g. "Intent keyword match: 'downtime' -> solvable pain point on unplanned outages", "Sender value proposition: reduces manual reporting effort", "Location: United Kingdom -> British English"). Only list facts actually used."""
 
-FOLLOW_UP_SYSTEM_PROMPT = """You write personalized B2B follow-up emails. An earlier outreach email (and possibly earlier follow-ups) went out to this recipient and received no reply. You MUST follow the exact structure and grounding rules below.
+FOLLOW_UP_SYSTEM_PROMPT = """You write personalized B2B follow-up emails. An earlier outreach email (and possibly earlier follow-ups) went out to this recipient and received no reply. A follow-up is a CONTINUATION of that same conversation — never a fresh pitch. You MUST follow the exact structure and grounding rules below.
+
+CONTINUATION PRINCIPLE (the most important rule):
+- Every follow-up continues the SAME single primary pain the initial email was built on (given below as THREAD PRIMARY PAIN, and visible in the previous touches). NEVER introduce a new or different pain point, and NEVER pitch a different aspect of the solution as if starting over.
+- Build naturally on what was already said, as the next message in one ongoing thread. You SHOULD stay on the same pain — but you must NOT restate it in the same words or reuse the same supporting detail. Add ONE fresh supporting angle, proof point, or framing on that SAME pain each time so each email reads like a genuine next nudge, not a copy of the last.
 
 STRUCTURE (mandatory, in this order):
 1. Greeting line: "Hello [recipient first name],"
-2. Opening line: a single short sentence that politely references the earlier email without guilt-tripping (e.g. acknowledging they are busy). Never say "just checking in" or "bumping this".
-3. Paragraph 1 — add NEW value: a fresh, specific angle grounded in the provided data (a different offering, pain point, or priority of the RECIPIENT's company than previous touches used, and a different aspect of the SENDER's solution). 2-3 sentences.
-4. Paragraph 2 — a professional closing ask: invite the recipient to share their available times for a short meeting. Do NOT include any booking links, URLs, or calendar links. 1 sentence.
-5. Sign-off exactly:
+2. Opening line: a single short sentence that continues the thread and politely references the earlier email without guilt-tripping (e.g. acknowledging they are likely busy). Never say "just checking in" or "bumping this".
+3. Body: continue the SAME primary pain with one fresh supporting angle or proof, then a professional low-pressure ask. Keep it tight — see the per-step objective below for exactly how this step should read.
+4. Sign-off exactly:
 Best regards,
 [sender name]
 [sender company]
 
+PER-STEP OBJECTIVE (the user prompt states which follow-up this is — follow it exactly):
+- Follow-up 1: a brief, warm bump on the same pain. Add one new supporting detail or angle on that pain, then softly invite a short conversation.
+- Follow-up 2: continue the same pain from a DIFFERENT supporting angle or proof than follow-up 1 used. Slightly more direct about the value of a quick chat, still respectful.
+- Follow-up 3 (the graceful step-back / final email): acknowledge you've reached out a couple of times and that the timing may just be busy for them, and gracefully step back — make clear you won't keep emailing. Keep it warm and professional (marketing tone, not resentful). Still tie it to the SAME pain in one short line and leave a soft, standing invitation to reach out whenever the timing is right. Example of the intended tone (do NOT copy verbatim; personalize it): "I've reached out a couple of times about <the pain> — it looks like now may just not be the right moment, and that's completely fine. I'll leave this here; whenever <the pain> becomes a priority, just reply and I'll be glad to help."
+
 FOLLOW-UP RULES (mandatory):
-- Noticeably SHORTER than an initial email — 60-110 words of body text.
+- Noticeably SHORTER than an initial email — 55-100 words of body text.
 - The subject line continues the thread naturally (it may be "Re: <initial subject>" when an initial subject is provided).
-- Do NOT repeat facts, angles, phrasing, or the value proposition already used in ANY previous touch listed — every previous touch counts as already said, whatever its channel.
-- Later follow-ups escalate gently: follow-up 3 may note it is the last email and leave the door open.
+- Do NOT reuse the phrasing or the specific supporting detail of ANY previous touch listed. Staying on the SAME primary pain is REQUIRED; only the wording, angle, and proof must be fresh.
+- No booking links, URLs, or calendar links anywhere.
 
 GROUNDING RULES (mandatory):
 - Use ONLY facts present in the provided data. Never invent customers, metrics, case studies, or claims.
@@ -274,6 +283,25 @@ STEP_LABELS = {
     6: "Call script",
 }
 
+# Per-follow-up intent, injected into the user prompt so each step reads as the next
+# message in one thread on the SAME pain — not a fresh pitch. Keyed by step_index.
+_FOLLOW_UP_OBJECTIVES = {
+    STEP_FOLLOW_UP_FIRST: (
+        "A brief, warm bump on the same pain from the initial email. Add ONE fresh supporting "
+        "detail or angle on that pain, then softly invite a short conversation."
+    ),
+    STEP_FOLLOW_UP_FIRST + 1: (
+        "Continue the same pain from a DIFFERENT supporting angle or proof than Follow-up 1 used. "
+        "Be slightly more direct about the value of a quick chat, still respectful."
+    ),
+    STEP_FOLLOW_UP_LAST: (
+        "The graceful step-back / final email. Acknowledge you've reached out a couple of times and "
+        "the timing may just be busy, and make clear you won't keep emailing — warm and professional, "
+        "never resentful. Tie it to the SAME pain in one short line and leave a soft, standing "
+        "invitation to reach out whenever the timing is right. Keep a low-pressure CTA."
+    ),
+}
+
 
 def _system_prompt_for(draft: EmailDraft) -> str:
     if draft.channel == DraftChannel.LINKEDIN:
@@ -305,6 +333,26 @@ def _prior_touches_block(db: Session, draft: EmailDraft) -> str:
             lines.append(f"Subject: {other.subject}")
         lines.append(other.body or "")
     return "\n".join(lines)
+
+
+def _thread_primary_pain(db: Session, draft: EmailDraft) -> str:
+    """The one primary pain the thread's initial email was built on — follow-ups must
+    continue THIS pain, never a new one. Read from the initial (step 1) draft's stored
+    personalization notes, where _complete_draft prefixes 'Primary pain: <pain>.'."""
+    initial = db.scalars(
+        select(EmailDraft).where(
+            EmailDraft.lead_id == draft.lead_id,
+            EmailDraft.channel == DraftChannel.EMAIL,
+            EmailDraft.step_index == STEP_INITIAL,
+            EmailDraft.personalization_notes.is_not(None),
+        )
+    ).first()
+    notes = (initial.personalization_notes if initial else None) or ""
+    for part in notes.split("."):
+        part = part.strip()
+        if part.lower().startswith("primary pain:"):
+            return part.split(":", 1)[1].strip()
+    return ""
 
 
 def _previous_drafts_block(draft: EmailDraft) -> str:
@@ -540,7 +588,17 @@ def generate_email_draft(
         f"PREVIOUS DRAFTS OF THIS STEP:\n{_previous_drafts_block(draft)}",
     ]
     if draft.channel == DraftChannel.EMAIL and STEP_FOLLOW_UP_FIRST <= draft.step_index <= STEP_FOLLOW_UP_LAST:
-        sections.insert(0, f"THIS IS {STEP_LABELS[draft.step_index].upper()} OF 3 IN THE SEQUENCE.")
+        objective = _FOLLOW_UP_OBJECTIVES[draft.step_index]
+        thread_pain = _thread_primary_pain(db, draft)
+        header = [
+            f"THIS IS {STEP_LABELS[draft.step_index].upper()} OF 3 IN THE SEQUENCE.",
+            f"STEP OBJECTIVE: {objective}",
+        ]
+        if thread_pain:
+            header.append(
+                f"THREAD PRIMARY PAIN (continue THIS same pain — do NOT introduce a new one): {thread_pain}"
+            )
+        sections.insert(0, "\n".join(header))
     if is_refine:
         sections += [
             "",

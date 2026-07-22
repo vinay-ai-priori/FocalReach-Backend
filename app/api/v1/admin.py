@@ -1,5 +1,6 @@
 """Administration panel API — every route is super-admin-only via the router-level guard."""
 
+from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends
@@ -11,6 +12,7 @@ from app.api.deps import get_db
 from app.core.exceptions import ConflictError, NotFoundError, ValidationFailedError
 from app.core.security import hash_password, validate_password_strength
 from app.models.organization import Organization
+from app.models.refresh_token import RefreshToken
 from app.models.tenant import Tenant
 from app.models.user import User, UserRole
 from app.repositories.user_repository import (
@@ -25,12 +27,31 @@ from app.schemas.admin import (
     OrganizationCreate,
     OrganizationOut,
     OrganizationUpdate,
+    SessionOut,
     TenantCreate,
     TenantOut,
     TenantUpdate,
     UserCreate,
     UserUpdate,
 )
+
+
+def _parse_device(user_agent: str | None) -> str:
+    """Best-effort browser label from a User-Agent string (order matters — Edge/Chrome
+    both contain 'Chrome', so check the more specific brands first)."""
+    if not user_agent:
+        return "Unknown"
+    ua = user_agent.lower()
+    for needle, label in (
+        ("edg", "Edge"),
+        ("opr", "Opera"),
+        ("firefox", "Firefox"),
+        ("chrome", "Chrome"),
+        ("safari", "Safari"),
+    ):
+        if needle in ua:
+            return label
+    return "Unknown"
 
 router = APIRouter(prefix="/admin", tags=["administration"], dependencies=[Depends(require_super_admin)])
 
@@ -223,3 +244,57 @@ def delete_user(user_id: UUID, db: Session = Depends(get_db)) -> Message:
         raise ValidationFailedError("The super admin account cannot be deleted from the admin panel.")
     repo.delete(user)
     return Message(message=f"User '{user.email}' deleted.")
+
+
+# ---------------- Sessions ----------------
+@router.get("/sessions", response_model=list[SessionOut])
+def list_sessions(db: Session = Depends(get_db)) -> list[SessionOut]:
+    """Active logins, one row per user. A session is live while its refresh token is
+    neither revoked nor expired; rotation keeps exactly one live token per session."""
+    now = datetime.now(timezone.utc)
+    live = db.scalars(
+        select(RefreshToken)
+        .where(RefreshToken.revoked_at.is_(None), RefreshToken.expires_at > now)
+        .order_by(RefreshToken.created_at.desc())
+    ).all()
+
+    by_user: dict[int, dict] = {}
+    for tok in live:
+        entry = by_user.get(tok.user_id)
+        if entry is None:
+            # First (most recent, since ordered desc) token for this user drives the row.
+            by_user[tok.user_id] = {"latest": tok, "count": 1}
+        else:
+            entry["count"] += 1
+
+    sessions: list[SessionOut] = []
+    for user_id, entry in by_user.items():
+        user = UserRepository(db).get(user_id)
+        if not user or not user.is_active:
+            continue
+        latest: RefreshToken = entry["latest"]
+        sessions.append(
+            SessionOut(
+                user_public_id=user.public_id,
+                full_name=user.full_name,
+                email=user.email,
+                role=user.role.value,
+                organization_name=user.organization.name if user.organization else None,
+                signed_in_at=user.last_login_at,
+                last_active_at=latest.created_at,
+                device=_parse_device(latest.user_agent),
+                session_count=entry["count"],
+            )
+        )
+    sessions.sort(key=lambda s: s.last_active_at, reverse=True)
+    return sessions
+
+
+@router.delete("/sessions/{user_id}", response_model=Message)
+def terminate_session(user_id: UUID, db: Session = Depends(get_db)) -> Message:
+    """Revoke every live refresh token for the user — signs them out immediately."""
+    user = UserRepository(db).get_by_public_id(user_id)
+    if not user:
+        raise NotFoundError(f"User {user_id} not found.")
+    RefreshTokenRepository(db).revoke_all_for_user(user.id)
+    return Message(message=f"Session for '{user.email}' terminated.")

@@ -16,5 +16,8 @@ class RefreshToken(Base, TimestampMixin):
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Raw User-Agent captured at login, carried across rotations — powers the "Device"
+    # column of the admin sessions view. Nullable: tokens issued before this column existed.
+    user_agent: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
     user = relationship("User", back_populates="refresh_tokens")
