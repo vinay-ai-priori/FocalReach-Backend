@@ -12,7 +12,11 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     DEBUG: bool = True
     API_V1_PREFIX: str = "/api/v1"
-    CORS_ORIGINS: List[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
+    CORS_ORIGINS: List[str] = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "https://app.focalreach-ai.com",
+    ]
 
     # Database
     DATABASE_URL: str = "postgresql+psycopg2://postgres:postgres@localhost:5432/focalreach"
@@ -84,6 +88,25 @@ class Settings(BaseSettings):
     # treated as neutral (paused + notified, no automated action) instead.
     REPLY_INTENT_CONFIDENCE_THRESHOLD: float = 0.6
     REPLY_DATETIME_CONFIDENCE_THRESHOLD: float = 0.6
+
+    # Knowledge base uploads
+    KNOWLEDGE_MAX_UPLOAD_MB: int = 25
+    # Below this many extractable characters a document is treated as image-only/scanned
+    # and flagged low_text instead of storing noise.
+    KNOWLEDGE_MIN_TEXT_CHARS: int = 40
+
+    # Object storage for original uploaded documents. STORAGE_MODE=local writes to
+    # LOCAL_STORAGE_DIR on disk (no cloud creds needed); STORAGE_MODE=s3 uses the AWS_* vars.
+    STORAGE_MODE: str = "local"  # "local" | "s3"
+    LOCAL_STORAGE_DIR: str = "var/uploads"
+
+    AWS_REGION: str = "us-east-1"
+    AWS_ACCESS_KEY_ID: str = ""
+    AWS_SECRET_ACCESS_KEY: str = ""
+    AWS_STORAGE_BUCKET_NAME: str = ""
+    AWS_S3_PREFIX: str = "focalreach"
+    # Optional custom endpoint for S3-compatible stores (MinIO etc.); blank for real AWS.
+    AWS_S3_ENDPOINT_URL: str = ""
 
     # Auth
     JWT_SECRET: str = "change-me-in-production"
