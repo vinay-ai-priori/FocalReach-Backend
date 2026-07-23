@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     APP_NAME: str = "FocalReach Outbound Engine"
     ENVIRONMENT: str = "development"
     DEBUG: bool = True
-    API_V1_PREFIX: str = "/api/v1"
+    API_V1_PREFIX: str = "/v1"
     CORS_ORIGINS: List[str] = [
         "http://localhost:5173",
         "http://127.0.0.1:5173",
